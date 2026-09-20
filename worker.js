@@ -56,7 +56,8 @@ export default {
         id: crypto.randomUUID(),
         text,
         type,
-        created: new Date().toISOString()
+        created: new Date().toISOString(),
+        history: []
       });
 
       await env.KV.put("memories", JSON.stringify(memories));
@@ -86,6 +87,16 @@ export default {
         return new Response("Memory not found", { status: 404 });
       }
 
+      if (!memory.history) {
+        memory.history = [];
+      }
+
+      memory.history.push({
+        text: memory.text,
+        type: memory.type,
+        saved: new Date().toISOString()
+      });
+
       if (text) memory.text = text;
       if (type) memory.type = type;
 
@@ -94,6 +105,29 @@ export default {
       await env.KV.put("memories", JSON.stringify(memories));
 
       return new Response("Memory updated.");
+    }
+
+    if (url.pathname === "/memory/history") {
+      const id = url.searchParams.get("id");
+
+      if (!id) {
+        return new Response("Missing memory id", { status: 400 });
+      }
+
+      const existing = await env.KV.get("memories");
+
+      if (!existing) {
+        return new Response("[]");
+      }
+
+      const memories = JSON.parse(existing);
+      const memory = memories.find(item => item.id === id);
+
+      if (!memory) {
+        return new Response("Memory not found", { status: 404 });
+      }
+
+      return new Response(JSON.stringify(memory.history || []));
     }
 
     return env.ASSETS.fetch(request);
