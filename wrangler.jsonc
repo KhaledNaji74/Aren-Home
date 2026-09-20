@@ -1,0 +1,14 @@
+{
+  "name": "aren-home",
+  "main": "worker.js",
+  "compatibility_date": "2026-09-20",
+  "assets": {
+    "directory": "."
+  },
+  "kv_namespaces": [
+    {
+      "binding": "KV",
+      "id": "41180744928f43ce8c599014cb460337"
+    }
+  ]
+}
