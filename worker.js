@@ -9,9 +9,22 @@ export default {
 
     if (url.pathname === "/remember") {
       const text = url.searchParams.get("text");
+      const type = url.searchParams.get("type") || "general";
 
       if (!text) {
         return new Response("Missing memory text", { status: 400 });
+      }
+
+      const allowedTypes = [
+        "identity",
+        "principle",
+        "experience",
+        "lesson",
+        "general"
+      ];
+
+      if (!allowedTypes.includes(type)) {
+        return new Response("Invalid memory type", { status: 400 });
       }
 
       const existing = await env.KV.get("memories");
@@ -19,6 +32,7 @@ export default {
 
       memories.push({
         text,
+        type,
         created: new Date().toISOString()
       });
 
