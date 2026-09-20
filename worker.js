@@ -53,6 +53,7 @@ export default {
       const memories = existing ? JSON.parse(existing) : [];
 
       memories.push({
+        id: crypto.randomUUID(),
         text,
         type,
         created: new Date().toISOString()
@@ -61,6 +62,38 @@ export default {
       await env.KV.put("memories", JSON.stringify(memories));
 
       return new Response("Memory saved.");
+    }
+
+    if (url.pathname === "/memory/update") {
+      const id = url.searchParams.get("id");
+      const text = url.searchParams.get("text");
+      const type = url.searchParams.get("type");
+
+      if (!id) {
+        return new Response("Missing memory id", { status: 400 });
+      }
+
+      const existing = await env.KV.get("memories");
+
+      if (!existing) {
+        return new Response("No memories stored yet.");
+      }
+
+      const memories = JSON.parse(existing);
+      const memory = memories.find(item => item.id === id);
+
+      if (!memory) {
+        return new Response("Memory not found", { status: 404 });
+      }
+
+      if (text) memory.text = text;
+      if (type) memory.type = type;
+
+      memory.updated = new Date().toISOString();
+
+      await env.KV.put("memories", JSON.stringify(memories));
+
+      return new Response("Memory updated.");
     }
 
     return env.ASSETS.fetch(request);
