@@ -7,12 +7,27 @@ export default {
       return new Response(memory || "No memories stored yet.");
     }
 
-    if (url.pathname === "/memory/type") {
-      const type = url.searchParams.get("type");
+   if (url.pathname === "/memory/type") {
+  const type = url.searchParams.get("type");
 
-      if (!type) {
-        return new Response("Missing memory type", { status: 400 });
-      }
+  if (!type) {
+    return new Response("Missing memory type", { status: 400 });
+  }
+
+  const existing = await env.KV.get("memories");
+
+  if (!existing) {
+    return new Response("[]");
+  }
+
+  const memories = JSON.parse(existing);
+
+  const filtered = memories.filter(
+    memory => memory && memory.type === type
+  );
+
+  return new Response(JSON.stringify(filtered));
+}
 
       const existing = await env.KV.get("memories");
       const memories = existing ? JSON.parse(existing) : [];
