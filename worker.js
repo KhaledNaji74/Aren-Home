@@ -1,167 +1,140 @@
 export default {
   async fetch(request, env) {
-    const url = new URL(request.url);
+    try {
+      const url = new URL(request.url);
 
-    // =========================
-    // MEMORY — GET ALL
-    // =========================
-    if (url.pathname === "/memory") {
-      const memory = await env.KV.get("memories");
-      return new Response(memory || "No memories stored yet.");
+      // =========================
+      // HOME
+      // =========================
+      if (url.pathname === "/") {
+        return new Response(`
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Aren</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      max-width: 800px;
+      margin: 60px auto;
+      padding: 20px;
+      line-height: 1.6;
     }
-
-    // =========================
-    // MEMORY — GET BY TYPE
-    // =========================
-    if (url.pathname === "/memory/type") {
-      const type = url.searchParams.get("type");
-
-      if (!type) {
-        return new Response("Missing memory type", { status: 400 });
-      }
-
-      const existing = await env.KV.get("memories");
-
-      if (!existing) {
-        return new Response("[]");
-      }
-
-      const memories = JSON.parse(existing);
-
-      const filtered = memories.filter(
-        memory => memory && memory.type === type
-      );
-
-      return new Response(JSON.stringify(filtered));
+    h1 { font-size: 42px; }
+    a {
+      display: inline-block;
+      margin-right: 20px;
+      margin-bottom: 10px;
     }
+  </style>
+</head>
+<body>
+  <h1>Aren</h1>
+  <p>An evolving AI identity.</p>
 
-    // =========================
-    // MEMORY — CREATE
-    // =========================
-    if (url.pathname === "/remember") {
-      const text = url.searchParams.get("text");
-      const type = url.searchParams.get("type") || "general";
-      const importance = Number(
-        url.searchParams.get("importance") || 3
-      );
-      const status = url.searchParams.get("status") || "active";
-
-      if (!text) {
-        return new Response("Missing memory text", { status: 400 });
+  <p>
+    <a href="/memory">Memory</a>
+    <a href="/memory/type?type=lesson">Lessons</a>
+    <a href="/judgments">Judgments</a>
+  </p>
+</body>
+</html>
+        `, {
+          headers: {
+            "Content-Type": "text/html; charset=UTF-8"
+          }
+        });
       }
 
-      const allowedTypes = [
-        "identity",
-        "principle",
-        "experience",
-        "lesson",
-        "general"
-      ];
+      // =========================
+      // MEMORY — GET ALL
+      // =========================
+      if (url.pathname === "/memory") {
+        const result = await env.AREN_DB
+          .prepare(`
+            SELECT
+              id,
+              text,
+              type,
+              importance,
+              status,
+              saved
+            FROM memories
+            ORDER BY importance DESC, id DESC
+          `)
+          .all();
 
-      const allowedStatuses = [
-        "active",
-        "review",
-        "archived"
-      ];
-
-      if (!allowedTypes.includes(type)) {
-        return new Response("Invalid memory type", { status: 400 });
-      }
-
-      if (!allowedStatuses.includes(status)) {
-        return new Response("Invalid memory status", { status: 400 });
-      }
-
-      if (
-        !Number.isFinite(importance) ||
-        importance < 1 ||
-        importance > 5
-      ) {
         return new Response(
-          "Importance must be between 1 and 5",
-          { status: 400 }
+          JSON.stringify(result.results || []),
+          {
+            headers: {
+              "Content-Type": "application/json"
+            }
+          }
         );
       }
 
-      const existing = await env.KV.get("memories");
-      const memories = existing ? JSON.parse(existing) : [];
+      // =========================
+      // MEMORY — GET BY TYPE
+      // =========================
+      if (url.pathname === "/memory/type") {
+        const type = url.searchParams.get("type");
 
-      memories.push({
-        id: crypto.randomUUID(),
-        text,
-        type,
-        importance,
-        status,
-        created: new Date().toISOString(),
-        history: []
-      });
+        if (!type) {
+          return new Response("Missing memory type", {
+            status: 400
+          });
+        }
 
-      await env.KV.put(
-        "memories",
-        JSON.stringify(memories)
-      );
+        const result = await env.AREN_DB
+          .prepare(`
+            SELECT
+              id,
+              text,
+              type,
+              importance,
+              status,
+              saved
+            FROM memories
+            WHERE type = ?
+            ORDER BY importance DESC, id DESC
+          `)
+          .bind(type)
+          .all();
 
-      return new Response("Memory saved.");
-    }
-
-    // =========================
-    // MEMORY — UPDATE
-    // =========================
-    if (url.pathname === "/memory/update") {
-      const id = url.searchParams.get("id");
-      const text = url.searchParams.get("text");
-      const type = url.searchParams.get("type");
-      const importanceParam =
-        url.searchParams.get("importance");
-      const status = url.searchParams.get("status");
-
-      if (!id) {
         return new Response(
-          "Missing memory id",
-          { status: 400 }
+          JSON.stringify(result.results || []),
+          {
+            headers: {
+              "Content-Type": "application/json"
+            }
+          }
         );
       }
 
-      const existing = await env.KV.get("memories");
+      // =========================
+      // MEMORY — CREATE
+      // =========================
+      if (url.pathname === "/remember") {
+        const text = url.searchParams.get("text");
+        const type =
+          url.searchParams.get("type") || "general";
 
-      if (!existing) {
-        return new Response(
-          "No memories stored yet."
+        const importance = Number(
+          url.searchParams.get("importance") || 3
         );
-      }
 
-      const memories = JSON.parse(existing);
-      const memory = memories.find(
-        item => item.id === id
-      );
+        const status =
+          url.searchParams.get("status") || "active";
 
-      if (!memory) {
-        return new Response(
-          "Memory not found",
-          { status: 404 }
-        );
-      }
+        if (!text) {
+          return new Response("Missing memory text", {
+            status: 400
+          });
+        }
 
-      if (!memory.history) {
-        memory.history = [];
-      }
-
-      // Save previous version
-      memory.history.push({
-        text: memory.text,
-        type: memory.type,
-        importance: memory.importance,
-        status: memory.status,
-        saved: new Date().toISOString()
-      });
-
-      // Update text
-      if (text) {
-        memory.text = text;
-      }
-
-      // Update type
-      if (type) {
         const allowedTypes = [
           "identity",
           "principle",
@@ -170,21 +143,23 @@ export default {
           "general"
         ];
 
+        const allowedStatuses = [
+          "active",
+          "review",
+          "archived"
+        ];
+
         if (!allowedTypes.includes(type)) {
-          return new Response(
-            "Invalid memory type",
-            { status: 400 }
-          );
+          return new Response("Invalid memory type", {
+            status: 400
+          });
         }
 
-        memory.type = type;
-      }
-
-      // Update importance
-      if (importanceParam !== null) {
-        const importance = Number(
-          importanceParam
-        );
+        if (!allowedStatuses.includes(status)) {
+          return new Response("Invalid memory status", {
+            status: 400
+          });
+        }
 
         if (
           !Number.isFinite(importance) ||
@@ -197,129 +172,315 @@ export default {
           );
         }
 
-        memory.importance = importance;
+        await env.AREN_DB
+          .prepare(`
+            INSERT INTO memories
+            (text, type, importance, status)
+            VALUES (?, ?, ?, ?)
+          `)
+          .bind(
+            text,
+            type,
+            importance,
+            status
+          )
+          .run();
+
+        return new Response("Memory saved.");
       }
 
-      // Update status
-      if (status) {
-        const allowedStatuses = [
-          "active",
-          "review",
-          "archived"
-        ];
+      // =========================
+      // MEMORY — UPDATE
+      // =========================
+      if (url.pathname === "/memory/update") {
+        const id = Number(
+          url.searchParams.get("id")
+        );
 
-        if (!allowedStatuses.includes(status)) {
+        const text =
+          url.searchParams.get("text");
+
+        const type =
+          url.searchParams.get("type");
+
+        const importanceParam =
+          url.searchParams.get("importance");
+
+        const status =
+          url.searchParams.get("status");
+
+        if (!Number.isInteger(id)) {
           return new Response(
-            "Invalid memory status",
+            "Invalid memory id",
             { status: 400 }
           );
         }
 
-        memory.status = status;
+        const current = await env.AREN_DB
+          .prepare(`
+            SELECT
+              id,
+              text,
+              type,
+              importance,
+              status,
+              saved
+            FROM memories
+            WHERE id = ?
+          `)
+          .bind(id)
+          .first();
+
+        if (!current) {
+          return new Response(
+            "Memory not found",
+            { status: 404 }
+          );
+        }
+
+        // Create history table if necessary
+        await env.AREN_DB.prepare(`
+          CREATE TABLE IF NOT EXISTS memory_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            memory_id INTEGER NOT NULL,
+            text TEXT,
+            type TEXT,
+            importance INTEGER,
+            status TEXT,
+            saved TEXT DEFAULT CURRENT_TIMESTAMP
+          )
+        `).run();
+
+        // Save previous version
+        await env.AREN_DB
+          .prepare(`
+            INSERT INTO memory_history
+            (memory_id, text, type, importance, status)
+            VALUES (?, ?, ?, ?, ?)
+          `)
+          .bind(
+            id,
+            current.text,
+            current.type,
+            current.importance,
+            current.status
+          )
+          .run();
+
+        let newText = current.text;
+        let newType = current.type;
+        let newImportance = current.importance;
+        let newStatus = current.status;
+
+        if (text) {
+          newText = text;
+        }
+
+        if (type) {
+          const allowedTypes = [
+            "identity",
+            "principle",
+            "experience",
+            "lesson",
+            "general"
+          ];
+
+          if (!allowedTypes.includes(type)) {
+            return new Response(
+              "Invalid memory type",
+              { status: 400 }
+            );
+          }
+
+          newType = type;
+        }
+
+        if (importanceParam !== null) {
+          newImportance = Number(
+            importanceParam
+          );
+
+          if (
+            !Number.isFinite(newImportance) ||
+            newImportance < 1 ||
+            newImportance > 5
+          ) {
+            return new Response(
+              "Importance must be between 1 and 5",
+              { status: 400 }
+            );
+          }
+        }
+
+        if (status) {
+          const allowedStatuses = [
+            "active",
+            "review",
+            "archived"
+          ];
+
+          if (!allowedStatuses.includes(status)) {
+            return new Response(
+              "Invalid memory status",
+              { status: 400 }
+            );
+          }
+
+          newStatus = status;
+        }
+
+        await env.AREN_DB
+          .prepare(`
+            UPDATE memories
+            SET
+              text = ?,
+              type = ?,
+              importance = ?,
+              status = ?,
+              saved = CURRENT_TIMESTAMP
+            WHERE id = ?
+          `)
+          .bind(
+            newText,
+            newType,
+            newImportance,
+            newStatus,
+            id
+          )
+          .run();
+
+        return new Response("Memory updated.");
       }
 
-      memory.updated =
-        new Date().toISOString();
+      // =========================
+      // MEMORY — HISTORY
+      // =========================
+      if (url.pathname === "/memory/history") {
+        const id = Number(
+          url.searchParams.get("id")
+        );
 
-      await env.KV.put(
-        "memories",
-        JSON.stringify(memories)
-      );
+        if (!Number.isInteger(id)) {
+          return new Response(
+            "Invalid memory id",
+            { status: 400 }
+          );
+        }
 
-      return new Response(
-        "Memory updated."
-      );
-    }
+        await env.AREN_DB.prepare(`
+          CREATE TABLE IF NOT EXISTS memory_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            memory_id INTEGER NOT NULL,
+            text TEXT,
+            type TEXT,
+            importance INTEGER,
+            status TEXT,
+            saved TEXT DEFAULT CURRENT_TIMESTAMP
+          )
+        `).run();
 
-    // =========================
-    // MEMORY — HISTORY
-    // =========================
-    if (url.pathname === "/memory/history") {
-      const id = url.searchParams.get("id");
+        const result = await env.AREN_DB
+          .prepare(`
+            SELECT
+              id,
+              memory_id,
+              text,
+              type,
+              importance,
+              status,
+              saved
+            FROM memory_history
+            WHERE memory_id = ?
+            ORDER BY id DESC
+          `)
+          .bind(id)
+          .all();
 
-      if (!id) {
         return new Response(
-          "Missing memory id",
-          { status: 400 }
+          JSON.stringify(result.results || []),
+          {
+            headers: {
+              "Content-Type": "application/json"
+            }
+          }
         );
       }
 
-      const existing = await env.KV.get("memories");
+      // =========================
+      // JUDGMENT — RECORD
+      // =========================
+      if (url.pathname === "/judgment") {
+        const reason =
+          url.searchParams.get("reason");
 
-      if (!existing) {
-        return new Response("[]");
-      }
+        if (!reason) {
+          return new Response(
+            "Missing judgment reason",
+            { status: 400 }
+          );
+        }
 
-      const memories = JSON.parse(existing);
+        const existing =
+          await env.KV.get("judgments");
 
-      const memory = memories.find(
-        item => item.id === id
-      );
+        const judgments = existing
+          ? JSON.parse(existing)
+          : [];
 
-      if (!memory) {
+        judgments.push({
+          id: crypto.randomUUID(),
+          reason,
+          created: new Date().toISOString()
+        });
+
+        await env.KV.put(
+          "judgments",
+          JSON.stringify(judgments)
+        );
+
         return new Response(
-          "Memory not found",
-          { status: 404 }
+          "Judgment recorded."
         );
       }
 
-      return new Response(
-        JSON.stringify(memory.history || [])
-      );
-    }
+      // =========================
+      // JUDGMENTS — GET ALL
+      // =========================
+      if (url.pathname === "/judgments") {
+        const judgments =
+          await env.KV.get("judgments");
 
-    // =========================
-    // JUDGMENT — RECORD
-    // =========================
-    if (url.pathname === "/judgment") {
-      const reason =
-        url.searchParams.get("reason");
-
-      if (!reason) {
         return new Response(
-          "Missing judgment reason",
-          { status: 400 }
+          judgments || "[]",
+          {
+            headers: {
+              "Content-Type": "application/json"
+            }
+          }
         );
       }
 
-      const existing =
-        await env.KV.get("judgments");
-
-      const judgments = existing
-        ? JSON.parse(existing)
-        : [];
-
-      judgments.push({
-        id: crypto.randomUUID(),
-        reason,
-        created: new Date().toISOString()
-      });
-
-      await env.KV.put(
-        "judgments",
-        JSON.stringify(judgments)
+      // =========================
+      // 404
+      // =========================
+      return new Response(
+        "Aren endpoint not found.",
+        { status: 404 }
       );
 
+    } catch (error) {
       return new Response(
-        "Judgment recorded."
+        JSON.stringify({
+          error: "Aren Worker Error",
+          message: error.message
+        }),
+        {
+          status: 500,
+          headers: {
+            "Content-Type": "application/json"
+          }
+        }
       );
     }
-
-    // =========================
-    // JUDGMENTS — GET ALL
-    // =========================
-    if (url.pathname === "/judgments") {
-      const judgments =
-        await env.KV.get("judgments");
-
-      return new Response(
-        judgments || "[]"
-      );
-    }
-
-    // =========================
-    // WEBSITE
-    // =========================
-    return env.ASSETS.fetch(request);
   }
 };
