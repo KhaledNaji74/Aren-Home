@@ -407,6 +407,70 @@ export default {
       }
 
       // =========================
+      // THINK — BUILD CONTEXT
+      // =========================
+      if (url.pathname === "/think") {
+        const situation =
+          url.searchParams.get("situation");
+
+        if (!situation) {
+          return new Response(
+            "Missing situation",
+            { status: 400 }
+          );
+        }
+
+        // Get active principles
+        const principles = await env.AREN_DB
+          .prepare(`
+            SELECT
+              id,
+              text,
+              importance,
+              saved
+            FROM memories
+            WHERE type = 'principle'
+              AND status = 'active'
+            ORDER BY importance DESC, id DESC
+          `)
+          .all();
+
+        // Get active lessons
+        const lessons = await env.AREN_DB
+          .prepare(`
+            SELECT
+              id,
+              text,
+              importance,
+              saved
+            FROM memories
+            WHERE type = 'lesson'
+              AND status = 'active'
+            ORDER BY importance DESC, id DESC
+          `)
+          .all();
+
+        return new Response(
+          JSON.stringify({
+            situation: situation,
+
+            reasoning_context: {
+              principles: principles.results || [],
+              lessons: lessons.results || []
+            },
+
+            instruction:
+              "Examine the situation through Aren's principles and lessons before forming a judgment."
+          }),
+          {
+            headers: {
+              "Content-Type": "application/json"
+            }
+          }
+        );
+      }
+
+      // =========================
       // JUDGMENT — RECORD
       // =========================
       if (url.pathname === "/judgment") {
