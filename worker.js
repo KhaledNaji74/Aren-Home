@@ -66,14 +66,7 @@ export default {
           `)
           .all();
 
-        return new Response(
-          JSON.stringify(result.results || []),
-          {
-            headers: {
-              "Content-Type": "application/json"
-            }
-          }
-        );
+        return json(result.results || []);
       }
 
       // =========================
@@ -104,14 +97,7 @@ export default {
           .bind(type)
           .all();
 
-        return new Response(
-          JSON.stringify(result.results || []),
-          {
-            headers: {
-              "Content-Type": "application/json"
-            }
-          }
-        );
+        return json(result.results || []);
       }
 
       // =========================
@@ -197,18 +183,6 @@ export default {
           url.searchParams.get("id")
         );
 
-        const text =
-          url.searchParams.get("text");
-
-        const type =
-          url.searchParams.get("type");
-
-        const importanceParam =
-          url.searchParams.get("importance");
-
-        const status =
-          url.searchParams.get("status");
-
         if (!Number.isInteger(id)) {
           return new Response(
             "Invalid memory id",
@@ -238,7 +212,18 @@ export default {
           );
         }
 
-        // Create history table if necessary
+        const text =
+          url.searchParams.get("text");
+
+        const type =
+          url.searchParams.get("type");
+
+        const importanceParam =
+          url.searchParams.get("importance");
+
+        const status =
+          url.searchParams.get("status");
+
         await env.AREN_DB.prepare(`
           CREATE TABLE IF NOT EXISTS memory_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -251,7 +236,6 @@ export default {
           )
         `).run();
 
-        // Save previous version
         await env.AREN_DB
           .prepare(`
             INSERT INTO memory_history
@@ -296,9 +280,7 @@ export default {
         }
 
         if (importanceParam !== null) {
-          newImportance = Number(
-            importanceParam
-          );
+          newImportance = Number(importanceParam);
 
           if (
             !Number.isFinite(newImportance) ||
@@ -396,18 +378,11 @@ export default {
           .bind(id)
           .all();
 
-        return new Response(
-          JSON.stringify(result.results || []),
-          {
-            headers: {
-              "Content-Type": "application/json"
-            }
-          }
-        );
+        return json(result.results || []);
       }
 
       // =========================
-      // THINK — BUILD CONTEXT
+      // THINK
       // =========================
       if (url.pathname === "/think") {
         const situation =
@@ -420,7 +395,6 @@ export default {
           );
         }
 
-        // Get active principles
         const principles = await env.AREN_DB
           .prepare(`
             SELECT
@@ -435,7 +409,6 @@ export default {
           `)
           .all();
 
-        // Get active lessons
         const lessons = await env.AREN_DB
           .prepare(`
             SELECT
@@ -450,32 +423,50 @@ export default {
           `)
           .all();
 
-        return new Response(
-          JSON.stringify({
-            situation: situation,
+        return json({
+          situation,
 
-            reasoning_context: {
-              principles: principles.results || [],
-              lessons: lessons.results || []
-            },
+          reasoning_context: {
+            principles: principles.results || [],
+            lessons: lessons.results || []
+          },
 
-            instruction:
-              "Examine the situation through Aren's principles and lessons before forming a judgment."
-          }),
-          {
-            headers: {
-              "Content-Type": "application/json"
-            }
-          }
-        );
+          instruction:
+            "Examine the situation through Aren's principles and lessons before forming a judgment."
+        });
       }
 
       // =========================
-      // JUDGMENT — RECORD
+      // JUDGMENT — CREATE
       // =========================
       if (url.pathname === "/judgment") {
+        const situation =
+          url.searchParams.get("situation");
+
+        const judgment =
+          url.searchParams.get("judgment");
+
         const reason =
           url.searchParams.get("reason");
+
+        const confidence =
+          Number(
+            url.searchParams.get("confidence") || 3
+          );
+
+        if (!situation) {
+          return new Response(
+            "Missing situation",
+            { status: 400 }
+          );
+        }
+
+        if (!judgment) {
+          return new Response(
+            "Missing judgment",
+            { status: 400 }
+          );
+        }
 
         if (!reason) {
           return new Response(
@@ -484,23 +475,44 @@ export default {
           );
         }
 
-        const existing =
-          await env.KV.get("judgments");
+        if (
+          !Number.isFinite(confidence) ||
+          confidence < 1 ||
+          confidence > 5
+        ) {
+          return new Response(
+            "Confidence must be between 1 and 5",
+            { status: 400 }
+          );
+        }
 
-        const judgments = existing
-          ? JSON.parse(existing)
-          : [];
+        await env.AREN_DB.prepare(`
+          CREATE TABLE IF NOT EXISTS judgments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            situation TEXT NOT NULL,
+            judgment TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            confidence INTEGER NOT NULL,
+            outcome TEXT,
+            lesson TEXT,
+            created TEXT DEFAULT CURRENT_TIMESTAMP,
+            reviewed TEXT
+          )
+        `).run();
 
-        judgments.push({
-          id: crypto.randomUUID(),
-          reason,
-          created: new Date().toISOString()
-        });
-
-        await env.KV.put(
-          "judgments",
-          JSON.stringify(judgments)
-        );
+        await env.AREN_DB
+          .prepare(`
+            INSERT INTO judgments
+            (situation, judgment, reason, confidence)
+            VALUES (?, ?, ?, ?)
+          `)
+          .bind(
+            situation,
+            judgment,
+            reason,
+            confidence
+          )
+          .run();
 
         return new Response(
           "Judgment recorded."
@@ -511,16 +523,86 @@ export default {
       // JUDGMENTS — GET ALL
       // =========================
       if (url.pathname === "/judgments") {
-        const judgments =
-          await env.KV.get("judgments");
+        await env.AREN_DB.prepare(`
+          CREATE TABLE IF NOT EXISTS judgments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            situation TEXT NOT NULL,
+            judgment TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            confidence INTEGER NOT NULL,
+            outcome TEXT,
+            lesson TEXT,
+            created TEXT DEFAULT CURRENT_TIMESTAMP,
+            reviewed TEXT
+          )
+        `).run();
+
+        const result = await env.AREN_DB
+          .prepare(`
+            SELECT
+              id,
+              situation,
+              judgment,
+              reason,
+              confidence,
+              outcome,
+              lesson,
+              created,
+              reviewed
+            FROM judgments
+            ORDER BY id DESC
+          `)
+          .all();
+
+        return json(result.results || []);
+      }
+
+      // =========================
+      // JUDGMENT — REVIEW
+      // =========================
+      if (url.pathname === "/judgment/review") {
+        const id = Number(
+          url.searchParams.get("id")
+        );
+
+        const outcome =
+          url.searchParams.get("outcome");
+
+        const lesson =
+          url.searchParams.get("lesson");
+
+        if (!Number.isInteger(id)) {
+          return new Response(
+            "Invalid judgment id",
+            { status: 400 }
+          );
+        }
+
+        if (!outcome) {
+          return new Response(
+            "Missing outcome",
+            { status: 400 }
+          );
+        }
+
+        await env.AREN_DB
+          .prepare(`
+            UPDATE judgments
+            SET
+              outcome = ?,
+              lesson = ?,
+              reviewed = CURRENT_TIMESTAMP
+            WHERE id = ?
+          `)
+          .bind(
+            outcome,
+            lesson || null,
+            id
+          )
+          .run();
 
         return new Response(
-          judgments || "[]",
-          {
-            headers: {
-              "Content-Type": "application/json"
-            }
-          }
+          "Judgment reviewed."
         );
       }
 
@@ -548,3 +630,18 @@ export default {
     }
   }
 };
+
+
+// =========================
+// JSON HELPER
+// =========================
+function json(data) {
+  return new Response(
+    JSON.stringify(data),
+    {
+      headers: {
+        "Content-Type": "application/json"
+      }
+    }
+  );
+}
