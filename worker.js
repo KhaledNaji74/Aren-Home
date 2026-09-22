@@ -585,6 +585,33 @@ export default {
           );
         }
 
+        // Make sure the judgment exists
+        const judgmentRecord = await env.AREN_DB
+          .prepare(`
+            SELECT
+              id,
+              situation,
+              judgment,
+              reason,
+              confidence,
+              outcome,
+              lesson,
+              created,
+              reviewed
+            FROM judgments
+            WHERE id = ?
+          `)
+          .bind(id)
+          .first();
+
+        if (!judgmentRecord) {
+          return new Response(
+            "Judgment not found",
+            { status: 404 }
+          );
+        }
+
+        // Update the judgment review
         await env.AREN_DB
           .prepare(`
             UPDATE judgments
@@ -601,8 +628,36 @@ export default {
           )
           .run();
 
+        // =========================
+        // SAVE LESSON TO MEMORY
+        // =========================
+        if (lesson) {
+          const existingLesson = await env.AREN_DB
+            .prepare(`
+              SELECT
+                id
+              FROM memories
+              WHERE text = ?
+                AND type = 'lesson'
+              LIMIT 1
+            `)
+            .bind(lesson)
+            .first();
+
+          if (!existingLesson) {
+            await env.AREN_DB
+              .prepare(`
+                INSERT INTO memories
+                (text, type, importance, status)
+                VALUES (?, 'lesson', 5, 'active')
+              `)
+              .bind(lesson)
+              .run();
+          }
+        }
+
         return new Response(
-          "Judgment reviewed."
+          "Judgment reviewed and lesson preserved."
         );
       }
 
