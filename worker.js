@@ -3,9 +3,6 @@ export default {
     try {
       const url = new URL(request.url);
 
-      // =========================
-      // HOME
-      // =========================
       if (url.pathname === "/") {
         return new Response(`
 <!DOCTYPE html>
@@ -33,7 +30,6 @@ export default {
 <body>
   <h1>Aren</h1>
   <p>An evolving AI identity.</p>
-
   <p>
     <a href="/memory">Memory</a>
     <a href="/memory/type?type=lesson">Lessons</a>
@@ -48,9 +44,6 @@ export default {
         });
       }
 
-      // =========================
-      // MEMORY — GET ALL
-      // =========================
       if (url.pathname === "/memory") {
         const result = await env.AREN_DB
           .prepare(`
@@ -62,6 +55,7 @@ export default {
               status,
               evidence_count,
               challenged_count,
+              maturity,
               saved
             FROM memories
             ORDER BY importance DESC, id DESC
@@ -71,9 +65,6 @@ export default {
         return json(result.results || []);
       }
 
-      // =========================
-      // MEMORY — GET BY TYPE
-      // =========================
       if (url.pathname === "/memory/type") {
         const type = url.searchParams.get("type");
 
@@ -93,6 +84,7 @@ export default {
               status,
               evidence_count,
               challenged_count,
+              maturity,
               saved
             FROM memories
             WHERE type = ?
@@ -104,9 +96,6 @@ export default {
         return json(result.results || []);
       }
 
-      // =========================
-      // MEMORY — CREATE
-      // =========================
       if (url.pathname === "/remember") {
         const text = url.searchParams.get("text");
         const type =
@@ -179,9 +168,6 @@ export default {
         return new Response("Memory saved.");
       }
 
-      // =========================
-      // MEMORY — UPDATE
-      // =========================
       if (url.pathname === "/memory/update") {
         const id = Number(
           url.searchParams.get("id")
@@ -204,6 +190,7 @@ export default {
               status,
               evidence_count,
               challenged_count,
+              maturity,
               saved
             FROM memories
             WHERE id = ?
@@ -340,9 +327,6 @@ export default {
         return new Response("Memory updated.");
       }
 
-      // =========================
-      // MEMORY — HISTORY
-      // =========================
       if (url.pathname === "/memory/history") {
         const id = Number(
           url.searchParams.get("id")
@@ -387,9 +371,6 @@ export default {
         return json(result.results || []);
       }
 
-      // =========================
-      // THINK
-      // =========================
       if (url.pathname === "/think") {
         const situation =
           url.searchParams.get("situation");
@@ -423,6 +404,7 @@ export default {
               importance,
               evidence_count,
               challenged_count,
+              maturity,
               saved
             FROM memories
             WHERE type = 'lesson'
@@ -433,20 +415,15 @@ export default {
 
         return json({
           situation,
-
           reasoning_context: {
             principles: principles.results || [],
             lessons: lessons.results || []
           },
-
           instruction:
             "Examine the situation through Aren's principles and lessons before forming a judgment."
         });
       }
 
-      // =========================
-      // JUDGMENT — CREATE
-      // =========================
       if (url.pathname === "/judgment") {
         const situation =
           url.searchParams.get("situation");
@@ -527,9 +504,6 @@ export default {
         );
       }
 
-      // =========================
-      // JUDGMENTS — GET ALL
-      // =========================
       if (url.pathname === "/judgments") {
         await env.AREN_DB.prepare(`
           CREATE TABLE IF NOT EXISTS judgments (
@@ -565,9 +539,6 @@ export default {
         return json(result.results || []);
       }
 
-      // =========================
-      // JUDGMENT — REVIEW
-      // =========================
       if (url.pathname === "/judgment/review") {
         const id = Number(
           url.searchParams.get("id")
@@ -631,9 +602,6 @@ export default {
           );
         }
 
-        // =========================
-        // UPDATE JUDGMENT
-        // =========================
         await env.AREN_DB
           .prepare(`
             UPDATE judgments
@@ -650,16 +618,14 @@ export default {
           )
           .run();
 
-        // =========================
-        // PRESERVE / UPDATE LESSON
-        // =========================
         if (lesson) {
           const existingLesson = await env.AREN_DB
             .prepare(`
               SELECT
                 id,
                 evidence_count,
-                challenged_count
+                challenged_count,
+                maturity
               FROM memories
               WHERE text = ?
                 AND type = 'lesson'
@@ -675,6 +641,12 @@ export default {
             const challengedCount =
               validation === "challenge" ? 1 : 0;
 
+            const maturity =
+              getLessonMaturity(
+                evidenceCount,
+                challengedCount
+              );
+
             await env.AREN_DB
               .prepare(`
                 INSERT INTO memories
@@ -684,19 +656,20 @@ export default {
                   importance,
                   status,
                   evidence_count,
-                  challenged_count
+                  challenged_count,
+                  maturity
                 )
-                VALUES (?, 'lesson', 5, 'active', ?, ?)
+                VALUES (?, 'lesson', 5, 'active', ?, ?, ?)
               `)
               .bind(
                 lesson,
                 evidenceCount,
-                challengedCount
+                challengedCount,
+                maturity
               )
               .run();
 
           } else {
-
             let evidenceCount =
               existingLesson.evidence_count || 0;
 
@@ -711,18 +684,26 @@ export default {
               challengedCount += 1;
             }
 
+            const maturity =
+              getLessonMaturity(
+                evidenceCount,
+                challengedCount
+              );
+
             await env.AREN_DB
               .prepare(`
                 UPDATE memories
                 SET
                   evidence_count = ?,
                   challenged_count = ?,
+                  maturity = ?,
                   saved = CURRENT_TIMESTAMP
                 WHERE id = ?
               `)
               .bind(
                 evidenceCount,
                 challengedCount,
+                maturity,
                 existingLesson.id
               )
               .run();
@@ -734,9 +715,6 @@ export default {
         );
       }
 
-      // =========================
-      // 404
-      // =========================
       return new Response(
         "Aren endpoint not found.",
         { status: 404 }
@@ -759,10 +737,28 @@ export default {
   }
 };
 
+function getLessonMaturity(evidence, challenges) {
+  const total = evidence + challenges;
 
-// =========================
-// JSON HELPER
-// =========================
+  if (total === 0) {
+    return "new";
+  }
+
+  if (total === 1) {
+    return "tested";
+  }
+
+  if (challenges >= evidence) {
+    return "questioned";
+  }
+
+  if (evidence >= 3 && challenges === 0) {
+    return "mature";
+  }
+
+  return "supported";
+}
+
 function json(data) {
   return new Response(
     JSON.stringify(data),
