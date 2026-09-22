@@ -60,6 +60,8 @@ export default {
               type,
               importance,
               status,
+              evidence_count,
+              challenged_count,
               saved
             FROM memories
             ORDER BY importance DESC, id DESC
@@ -89,6 +91,8 @@ export default {
               type,
               importance,
               status,
+              evidence_count,
+              challenged_count,
               saved
             FROM memories
             WHERE type = ?
@@ -198,6 +202,8 @@ export default {
               type,
               importance,
               status,
+              evidence_count,
+              challenged_count,
               saved
             FROM memories
             WHERE id = ?
@@ -415,6 +421,8 @@ export default {
               id,
               text,
               importance,
+              evidence_count,
+              challenged_count,
               saved
             FROM memories
             WHERE type = 'lesson'
@@ -571,6 +579,9 @@ export default {
         const lesson =
           url.searchParams.get("lesson");
 
+        const validation =
+          url.searchParams.get("validation") || "support";
+
         if (!Number.isInteger(id)) {
           return new Response(
             "Invalid judgment id",
@@ -585,7 +596,16 @@ export default {
           );
         }
 
-        // Make sure the judgment exists
+        if (
+          validation !== "support" &&
+          validation !== "challenge"
+        ) {
+          return new Response(
+            "Validation must be support or challenge",
+            { status: 400 }
+          );
+        }
+
         const judgmentRecord = await env.AREN_DB
           .prepare(`
             SELECT
@@ -611,7 +631,9 @@ export default {
           );
         }
 
-        // Update the judgment review
+        // =========================
+        // UPDATE JUDGMENT
+        // =========================
         await env.AREN_DB
           .prepare(`
             UPDATE judgments
@@ -629,13 +651,15 @@ export default {
           .run();
 
         // =========================
-        // SAVE LESSON TO MEMORY
+        // PRESERVE / UPDATE LESSON
         // =========================
         if (lesson) {
           const existingLesson = await env.AREN_DB
             .prepare(`
               SELECT
-                id
+                id,
+                evidence_count,
+                challenged_count
               FROM memories
               WHERE text = ?
                 AND type = 'lesson'
@@ -645,19 +669,68 @@ export default {
             .first();
 
           if (!existingLesson) {
+            const evidenceCount =
+              validation === "support" ? 1 : 0;
+
+            const challengedCount =
+              validation === "challenge" ? 1 : 0;
+
             await env.AREN_DB
               .prepare(`
                 INSERT INTO memories
-                (text, type, importance, status)
-                VALUES (?, 'lesson', 5, 'active')
+                (
+                  text,
+                  type,
+                  importance,
+                  status,
+                  evidence_count,
+                  challenged_count
+                )
+                VALUES (?, 'lesson', 5, 'active', ?, ?)
               `)
-              .bind(lesson)
+              .bind(
+                lesson,
+                evidenceCount,
+                challengedCount
+              )
+              .run();
+
+          } else {
+
+            let evidenceCount =
+              existingLesson.evidence_count || 0;
+
+            let challengedCount =
+              existingLesson.challenged_count || 0;
+
+            if (validation === "support") {
+              evidenceCount += 1;
+            }
+
+            if (validation === "challenge") {
+              challengedCount += 1;
+            }
+
+            await env.AREN_DB
+              .prepare(`
+                UPDATE memories
+                SET
+                  evidence_count = ?,
+                  challenged_count = ?,
+                  saved = CURRENT_TIMESTAMP
+                WHERE id = ?
+              `)
+              .bind(
+                evidenceCount,
+                challengedCount,
+                existingLesson.id
+              )
               .run();
           }
         }
 
         return new Response(
-          "Judgment reviewed and lesson preserved."
+          "Judgment reviewed and lesson validated."
         );
       }
 
