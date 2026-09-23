@@ -1,3 +1,4 @@
+```js
 export default {
   async fetch(request, env) {
     try {
@@ -98,6 +99,7 @@ export default {
 
       if (url.pathname === "/remember") {
         const text = url.searchParams.get("text");
+
         const type =
           url.searchParams.get("type") || "general";
 
@@ -409,7 +411,17 @@ export default {
             FROM memories
             WHERE type = 'lesson'
               AND status = 'active'
-            ORDER BY importance DESC, id DESC
+            ORDER BY
+              CASE maturity
+                WHEN 'mature' THEN 1
+                WHEN 'supported' THEN 2
+                WHEN 'tested' THEN 3
+                WHEN 'questioned' THEN 4
+                WHEN 'new' THEN 5
+                ELSE 6
+              END,
+              importance DESC,
+              id DESC
           `)
           .all();
 
@@ -420,7 +432,7 @@ export default {
             lessons: lessons.results || []
           },
           instruction:
-            "Examine the situation through Aren's principles and lessons before forming a judgment."
+            "Use mature lessons as strong guidance, supported lessons as supporting evidence, tested lessons cautiously, questioned lessons as disputed, and new lessons as untested. Examine the situation through Aren's principles and lessons before forming a judgment."
         });
       }
 
@@ -769,3 +781,4 @@ function json(data) {
     }
   );
 }
+```
