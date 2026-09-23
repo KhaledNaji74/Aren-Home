@@ -744,11 +744,7 @@ function getLessonMaturity(evidence, challenges) {
     return "new";
   }
 
-  if (total === 1) {
-    return "tested";
-  }
-
-  if (challenges >= evidence) {
+  if (challenges > evidence) {
     return "questioned";
   }
 
@@ -756,7 +752,11 @@ function getLessonMaturity(evidence, challenges) {
     return "mature";
   }
 
-  return "supported";
+  if (evidence > challenges) {
+    return "supported";
+  }
+
+  return "tested";
 }
 
 function json(data) {
