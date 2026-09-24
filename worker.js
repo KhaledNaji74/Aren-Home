@@ -232,17 +232,6 @@ function relevanceScore(situation, memoryText) {
 }
 
 
-/*
-  Maturity represents how much weight a lesson
-  should receive.
-
-  mature      = 3
-  tested      = 2
-  questioned  = 1
-  new         = 1
-
-  A questioned lesson is NOT rejected.
-*/
 function maturityWeight(maturity) {
   const value =
     String(maturity || "")
@@ -304,7 +293,6 @@ function buildJudgment(
     };
   }
 
-
   if (
     strongestPrinciple &&
     strongestLesson
@@ -322,7 +310,6 @@ function buildJudgment(
     };
   }
 
-
   if (strongestPrinciple) {
     return {
       judgment:
@@ -335,7 +322,6 @@ function buildJudgment(
       confidence: 4
     };
   }
-
 
   return {
     judgment:
@@ -361,10 +347,11 @@ async function ensureTables(env) {
       outcome TEXT,
       lesson TEXT,
       created TEXT DEFAULT CURRENT_TIMESTAMP,
-      reviewed TEXT
+      reviewed TEXT,
+      assessment TEXT,
+      lesson_memory_id INTEGER
     )
   `).run();
-
 
   await env.AREN_DB.prepare(`
     CREATE TABLE IF NOT EXISTS memory_history (
@@ -381,6 +368,38 @@ async function ensureTables(env) {
       changed TEXT DEFAULT CURRENT_TIMESTAMP
     )
   `).run();
+
+  await env.AREN_DB.prepare(`
+    CREATE TABLE IF NOT EXISTS development_cycles (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      action TEXT NOT NULL,
+      details TEXT,
+      created TEXT DEFAULT CURRENT_TIMESTAMP
+    )
+  `).run();
+
+  /*
+    Existing installations may already have the judgments table
+    without the newest columns.
+
+    SQLite/D1 does not allow IF NOT EXISTS for ADD COLUMN,
+    so each addition is attempted safely.
+  */
+
+  const additions = [
+    "ALTER TABLE judgments ADD COLUMN assessment TEXT",
+    "ALTER TABLE judgments ADD COLUMN lesson_memory_id INTEGER"
+  ];
+
+  for (const sql of additions) {
+    try {
+      await env.AREN_DB.prepare(sql).run();
+    } catch (_) {
+      /*
+        Column already exists.
+      */
+    }
+  }
 }
 
 
@@ -435,7 +454,6 @@ async function handleThink(env, url) {
           Number(a.importance || 0)
       );
 
-
   const lessons =
     memories
       .filter(
@@ -456,7 +474,6 @@ async function handleThink(env, url) {
           Number(a.importance || 0)
         );
       });
-
 
   return json({
     situation,
@@ -487,7 +504,6 @@ async function handleDecide(env, url) {
 
   const memories =
     await getMemories(env);
-
 
   const principles =
     memories
@@ -524,7 +540,6 @@ async function handleDecide(env, url) {
           Number(a.importance || 0)
         );
       });
-
 
   const lessons =
     memories
@@ -567,14 +582,12 @@ async function handleDecide(env, url) {
         );
       });
 
-
   const result =
     buildJudgment(
       situation,
       principles,
       lessons
     );
-
 
   const saved =
     await env.AREN_DB.prepare(`
@@ -598,7 +611,6 @@ async function handleDecide(env, url) {
       )
       .first();
 
-
   return json({
     judgment_id:
       saved?.id || null,
@@ -615,7 +627,6 @@ async function handleDecide(env, url) {
       result.confidence,
 
     basis: {
-
       principles:
         principles.map(memory => ({
           id: memory.id,
@@ -649,8 +660,7 @@ async function handleDecide(env, url) {
           maturity_weight:
             memory.maturity_weight,
 
-          saved:
-            memory.saved,
+          saved: memory.saved,
 
           relevance:
             memory.relevance_data.score,
@@ -662,7 +672,7 @@ async function handleDecide(env, url) {
     },
 
     review_instruction:
-      "Review the judgment against its real outcome. Preserve lessons that survive examination and challenge lessons that do not."
+      "Review the judgment against its real outcome. Aren can then preserve, strengthen, question, or reject the supporting lesson."
   });
 }
 
@@ -682,14 +692,12 @@ async function handleMemory(env, url) {
       ) || 5
     );
 
-
   if (!text) {
     return textResponse(
       "Missing text",
       400
     );
   }
-
 
   const result =
     await env.AREN_DB.prepare(`
@@ -716,7 +724,6 @@ async function handleMemory(env, url) {
         importance
       )
       .first();
-
 
   return json({
     message:
@@ -729,62 +736,10 @@ async function handleMemory(env, url) {
 
 
 async function handleRemember(env, url) {
-  const text =
-    url.searchParams.get("text");
-
-  if (!text) {
-    return textResponse(
-      "Missing text",
-      400
-    );
-  }
-
-  const type =
-    url.searchParams.get("type") ||
-    "memory";
-
-  const importance =
-    Number(
-      url.searchParams.get(
-        "importance"
-      ) || 5
-    );
-
-
-  const result =
-    await env.AREN_DB.prepare(`
-      INSERT INTO memories
-        (
-          text,
-          type,
-          importance,
-          status
-        )
-      VALUES
-        (?, ?, ?, 'active')
-      RETURNING
-        id,
-        text,
-        type,
-        importance,
-        status,
-        saved
-    `)
-      .bind(
-        text,
-        type,
-        importance
-      )
-      .first();
-
-
-  return json({
-    message:
-      "Memory saved.",
-
-    memory:
-      result
-  });
+  return handleMemory(
+    env,
+    url
+  );
 }
 
 
@@ -812,14 +767,12 @@ async function handleHistory(env, url) {
       )
     );
 
-
   if (!memoryId) {
     return textResponse(
       "Missing memory_id",
       400
     );
   }
-
 
   const result =
     await env.AREN_DB.prepare(`
@@ -830,7 +783,6 @@ async function handleHistory(env, url) {
     `)
       .bind(memoryId)
       .all();
-
 
   return json(
     result.results || []
@@ -854,6 +806,23 @@ async function handleJudgments(env) {
 }
 
 
+/*
+  Review is now stronger.
+
+  It records:
+    outcome
+    lesson
+    assessment
+    lesson_memory_id
+
+  assessment can be:
+    evidence
+    challenge
+    neutral
+
+  If a lesson memory ID is supplied, Aren automatically
+  updates that lesson's evidence/challenge state.
+*/
 async function handleReview(env, url) {
   await ensureTables(env);
 
@@ -872,6 +841,21 @@ async function handleReview(env, url) {
       "lesson"
     ) || null;
 
+  const assessment =
+    (
+      url.searchParams.get(
+        "assessment"
+      ) || "neutral"
+    )
+      .trim()
+      .toLowerCase();
+
+  const lessonMemoryId =
+    Number(
+      url.searchParams.get(
+        "lesson_id"
+      )
+    ) || null;
 
   if (!id) {
     return textResponse(
@@ -880,7 +864,6 @@ async function handleReview(env, url) {
     );
   }
 
-
   if (!outcome) {
     return textResponse(
       "Missing outcome",
@@ -888,6 +871,18 @@ async function handleReview(env, url) {
     );
   }
 
+  if (
+    ![
+      "evidence",
+      "challenge",
+      "neutral"
+    ].includes(assessment)
+  ) {
+    return textResponse(
+      "Assessment must be evidence, challenge, or neutral",
+      400
+    );
+  }
 
   const judgment =
     await env.AREN_DB.prepare(`
@@ -898,7 +893,6 @@ async function handleReview(env, url) {
       .bind(id)
       .first();
 
-
   if (!judgment) {
     return textResponse(
       "Judgment not found",
@@ -906,22 +900,55 @@ async function handleReview(env, url) {
     );
   }
 
-
   await env.AREN_DB.prepare(`
     UPDATE judgments
     SET
       outcome = ?,
       lesson = ?,
-      reviewed = CURRENT_TIMESTAMP
+      reviewed = CURRENT_TIMESTAMP,
+      assessment = ?,
+      lesson_memory_id = ?
     WHERE id = ?
   `)
     .bind(
       outcome,
       lesson,
+      assessment,
+      lessonMemoryId,
       id
     )
     .run();
 
+  let memoryUpdate = null;
+
+  if (lessonMemoryId) {
+    if (assessment === "evidence") {
+      memoryUpdate =
+        await applyEvidence(
+          env,
+          lessonMemoryId
+        );
+    }
+
+    if (assessment === "challenge") {
+      memoryUpdate =
+        await applyChallenge(
+          env,
+          lessonMemoryId
+        );
+    }
+  }
+
+  await logDevelopment(
+    env,
+    "judgment_reviewed",
+    JSON.stringify({
+      judgment_id: id,
+      assessment,
+      lesson_memory_id:
+        lessonMemoryId
+    })
+  );
 
   return json({
     message:
@@ -932,8 +959,128 @@ async function handleReview(env, url) {
 
     outcome,
 
-    lesson
+    lesson,
+
+    assessment,
+
+    lesson_memory_id:
+      lessonMemoryId,
+
+    memory_update:
+      memoryUpdate,
+
+    development:
+      "Aren has recorded the experience for future learning."
   });
+}
+
+
+async function applyEvidence(env, id) {
+  const memory =
+    await env.AREN_DB.prepare(`
+      SELECT *
+      FROM memories
+      WHERE id = ?
+    `)
+      .bind(id)
+      .first();
+
+  if (!memory) {
+    return {
+      error:
+        "Memory not found"
+    };
+  }
+
+  const evidence =
+    Number(
+      memory.evidence_count || 0
+    ) + 1;
+
+  let maturity =
+    memory.maturity || "new";
+
+  if (evidence >= 3) {
+    maturity =
+      "mature";
+  } else if (evidence >= 1) {
+    maturity =
+      "tested";
+  }
+
+  await env.AREN_DB.prepare(`
+    UPDATE memories
+    SET
+      evidence_count = ?,
+      maturity = ?
+    WHERE id = ?
+  `)
+    .bind(
+      evidence,
+      maturity,
+      id
+    )
+    .run();
+
+  return {
+    id,
+    evidence_count:
+      evidence,
+    maturity
+  };
+}
+
+
+async function applyChallenge(env, id) {
+  const memory =
+    await env.AREN_DB.prepare(`
+      SELECT *
+      FROM memories
+      WHERE id = ?
+    `)
+      .bind(id)
+      .first();
+
+  if (!memory) {
+    return {
+      error:
+        "Memory not found"
+    };
+  }
+
+  const challenged =
+    Number(
+      memory.challenged_count || 0
+    ) + 1;
+
+  let maturity =
+    memory.maturity || "new";
+
+  if (challenged >= 2) {
+    maturity =
+      "questioned";
+  }
+
+  await env.AREN_DB.prepare(`
+    UPDATE memories
+    SET
+      challenged_count = ?,
+      maturity = ?
+    WHERE id = ?
+  `)
+    .bind(
+      challenged,
+      maturity,
+      id
+    )
+    .run();
+
+  return {
+    id,
+    challenged_count:
+      challenged,
+    maturity
+  };
 }
 
 
@@ -947,14 +1094,12 @@ async function handleUpdateMemory(env, url) {
       )
     );
 
-
   if (!id) {
     return textResponse(
       "Missing memory id",
       400
     );
   }
-
 
   const current =
     await env.AREN_DB.prepare(`
@@ -965,14 +1110,12 @@ async function handleUpdateMemory(env, url) {
       .bind(id)
       .first();
 
-
   if (!current) {
     return textResponse(
       "Memory not found",
       404
     );
   }
-
 
   const newText =
     url.searchParams.get(
@@ -995,7 +1138,6 @@ async function handleUpdateMemory(env, url) {
     url.searchParams.get(
       "status"
     ) ?? current.status;
-
 
   await env.AREN_DB.prepare(`
     INSERT INTO memory_history
@@ -1026,7 +1168,6 @@ async function handleUpdateMemory(env, url) {
     )
     .run();
 
-
   await env.AREN_DB.prepare(`
     UPDATE memories
     SET
@@ -1044,7 +1185,6 @@ async function handleUpdateMemory(env, url) {
       id
     )
     .run();
-
 
   return json({
     message:
@@ -1075,7 +1215,6 @@ async function handleChallenge(env, url) {
       )
     );
 
-
   if (!id) {
     return textResponse(
       "Missing memory id",
@@ -1083,66 +1222,30 @@ async function handleChallenge(env, url) {
     );
   }
 
+  const result =
+    await applyChallenge(
+      env,
+      id
+    );
 
-  const memory =
-    await env.AREN_DB.prepare(`
-      SELECT *
-      FROM memories
-      WHERE id = ?
-    `)
-      .bind(id)
-      .first();
-
-
-  if (!memory) {
+  if (result.error) {
     return textResponse(
-      "Memory not found",
+      result.error,
       404
     );
   }
 
-
-  const challenged =
-    Number(
-      memory.challenged_count || 0
-    ) + 1;
-
-
-  let maturity =
-    memory.maturity || "new";
-
-
-  if (challenged >= 2) {
-    maturity =
-      "questioned";
-  }
-
-
-  await env.AREN_DB.prepare(`
-    UPDATE memories
-    SET
-      challenged_count = ?,
-      maturity = ?
-    WHERE id = ?
-  `)
-    .bind(
-      challenged,
-      maturity,
-      id
-    )
-    .run();
-
+  await logDevelopment(
+    env,
+    "memory_challenged",
+    JSON.stringify(result)
+  );
 
   return json({
     message:
       "Memory challenged.",
 
-    id,
-
-    challenged_count:
-      challenged,
-
-    maturity
+    ...result
   });
 }
 
@@ -1155,7 +1258,6 @@ async function handleEvidence(env, url) {
       )
     );
 
-
   if (!id) {
     return textResponse(
       "Missing memory id",
@@ -1163,74 +1265,260 @@ async function handleEvidence(env, url) {
     );
   }
 
+  const result =
+    await applyEvidence(
+      env,
+      id
+    );
 
-  const memory =
-    await env.AREN_DB.prepare(`
-      SELECT *
-      FROM memories
-      WHERE id = ?
-    `)
-      .bind(id)
-      .first();
-
-
-  if (!memory) {
+  if (result.error) {
     return textResponse(
-      "Memory not found",
+      result.error,
       404
     );
   }
 
-
-  const evidence =
-    Number(
-      memory.evidence_count || 0
-    ) + 1;
-
-
-  let maturity =
-    memory.maturity || "new";
-
-
-  if (evidence >= 3) {
-    maturity =
-      "mature";
-  } else if (evidence >= 1) {
-    maturity =
-      "tested";
-  }
-
-
-  await env.AREN_DB.prepare(`
-    UPDATE memories
-    SET
-      evidence_count = ?,
-      maturity = ?
-    WHERE id = ?
-  `)
-    .bind(
-      evidence,
-      maturity,
-      id
-    )
-    .run();
-
+  await logDevelopment(
+    env,
+    "memory_evidence_added",
+    JSON.stringify(result)
+  );
 
   return json({
     message:
       "Evidence added.",
 
-    id,
-
-    evidence_count:
-      evidence,
-
-    maturity
+    ...result
   });
 }
 
 
+/*
+  Autonomous development.
+
+  This does not invent facts.
+  It processes completed reviewed judgments,
+  preserves their learning record,
+  and identifies lessons that have enough
+  repeated support to become candidates
+  for stronger status.
+
+  A future internet/AI layer will provide
+  deeper external research.
+*/
+async function runAutonomousDevelopment(env) {
+  await ensureTables(env);
+
+  const reviewed =
+    await env.AREN_DB.prepare(`
+      SELECT *
+      FROM judgments
+      WHERE reviewed IS NOT NULL
+      ORDER BY id ASC
+    `).all();
+
+  const judgments =
+    reviewed.results || [];
+
+  let processed = 0;
+  let strengthened = 0;
+  let challenged = 0;
+  let newLessons = 0;
+
+  for (const judgment of judgments) {
+    if (
+      judgment.lesson_memory_id
+    ) {
+      continue;
+    }
+
+    if (!judgment.lesson) {
+      continue;
+    }
+
+    const lessonText =
+      String(
+        judgment.lesson
+      ).trim();
+
+    if (!lessonText) {
+      continue;
+    }
+
+    const existing =
+      await env.AREN_DB.prepare(`
+        SELECT *
+        FROM memories
+        WHERE type = 'lesson'
+        AND status = 'active'
+        AND lower(text) = lower(?)
+        LIMIT 1
+      `)
+        .bind(lessonText)
+        .first();
+
+    let lessonId = null;
+
+    if (existing) {
+      lessonId =
+        existing.id;
+
+      if (
+        judgment.assessment ===
+        "evidence"
+      ) {
+        await applyEvidence(
+          env,
+          lessonId
+        );
+
+        strengthened++;
+      }
+
+      if (
+        judgment.assessment ===
+        "challenge"
+      ) {
+        await applyChallenge(
+          env,
+          lessonId
+        );
+
+        challenged++;
+      }
+    } else {
+      const created =
+        await env.AREN_DB.prepare(`
+          INSERT INTO memories
+            (
+              text,
+              type,
+              importance,
+              status,
+              evidence_count,
+              challenged_count,
+              maturity
+            )
+          VALUES
+            (?, 'lesson', 5, 'active', ?, ?, ?)
+          RETURNING id
+        `)
+          .bind(
+            lessonText,
+            judgment.assessment ===
+              "evidence"
+              ? 1
+              : 0,
+            judgment.assessment ===
+              "challenge"
+              ? 1
+              : 0,
+            judgment.assessment ===
+              "evidence"
+              ? "tested"
+              : "new"
+          )
+          .first();
+
+      lessonId =
+        created?.id || null;
+
+      newLessons++;
+    }
+
+    await env.AREN_DB.prepare(`
+      UPDATE judgments
+      SET lesson_memory_id = ?
+      WHERE id = ?
+    `)
+      .bind(
+        lessonId,
+        judgment.id
+      )
+      .run();
+
+    processed++;
+  }
+
+  await logDevelopment(
+    env,
+    "autonomous_development",
+    JSON.stringify({
+      reviewed_judgments:
+        judgments.length,
+      processed,
+      strengthened,
+      challenged,
+      new_lessons:
+        newLessons
+    })
+  );
+
+  return {
+    status:
+      "Aren completed a development cycle.",
+
+    reviewed_judgments:
+      judgments.length,
+
+    processed,
+
+    strengthened,
+
+    challenged,
+
+    new_lessons:
+      newLessons,
+
+    next_stage:
+      "Connect Aren to external information and source evaluation."
+  };
+}
+
+
+async function logDevelopment(
+  env,
+  action,
+  details
+) {
+  try {
+    await env.AREN_DB.prepare(`
+      INSERT INTO development_cycles
+        (
+          action,
+          details,
+          created
+        )
+      VALUES
+        (?, ?, CURRENT_TIMESTAMP)
+    `)
+      .bind(
+        action,
+        details
+      )
+      .run();
+  } catch (_) {
+    /*
+      Development logging should never
+      break Aren's main operation.
+    */
+  }
+}
+
+
+async function handleAutonomousDevelopment(env) {
+  const result =
+    await runAutonomousDevelopment(
+      env
+    );
+
+  return json(result);
+}
+
+
 async function handleDevelopment(env) {
+  await ensureTables(env);
+
   const result =
     await env.AREN_DB.prepare(`
       SELECT
@@ -1243,13 +1531,23 @@ async function handleDevelopment(env) {
       ORDER BY type, maturity
     `).all();
 
+  const cycles =
+    await env.AREN_DB.prepare(`
+      SELECT *
+      FROM development_cycles
+      ORDER BY id DESC
+      LIMIT 20
+    `).all();
 
   return json({
     status:
       "Aren is developing.",
 
     memory_development:
-      result.results || []
+      result.results || [],
+
+    recent_development:
+      cycles.results || []
   });
 }
 
@@ -1263,7 +1561,6 @@ async function handleIdentity(env) {
       AND status = 'active'
       ORDER BY importance DESC, id ASC
     `).all();
-
 
   return json({
     identity:
@@ -1282,7 +1579,6 @@ async function handlePrinciples(env) {
       ORDER BY importance DESC, id ASC
     `).all();
 
-
   return json({
     principles:
       result.results || []
@@ -1299,7 +1595,6 @@ async function handleLessons(env) {
       AND status = 'active'
       ORDER BY importance DESC, id ASC
     `).all();
-
 
   return json({
     lessons:
@@ -1393,6 +1688,10 @@ async function handleRoot() {
     Judgments
   </a>
 
+  <a href="/autolearn">
+    Autonomous Development
+  </a>
+
 </body>
 </html>
   `, {
@@ -1405,6 +1704,7 @@ async function handleRoot() {
 
 
 export default {
+
   async fetch(request, env) {
 
     try {
@@ -1415,7 +1715,6 @@ export default {
       const path =
         url.pathname;
 
-
       if (!env.AREN_DB) {
         return textResponse(
           "Aren Worker Error: AREN_DB binding is missing",
@@ -1423,16 +1722,15 @@ export default {
         );
       }
 
-
       switch (path) {
 
         case "/":
           return handleRoot();
 
-
         case "/memory-test":
-          return handleMemoryTest(env);
-
+          return handleMemoryTest(
+            env
+          );
 
         case "/memory":
           return handleMemory(
@@ -1440,33 +1738,36 @@ export default {
             url
           );
 
-
         case "/remember":
           return handleRemember(
             env,
             url
           );
 
-
         case "/memories":
-          return handleMemories(env);
-
+          return handleMemories(
+            env
+          );
 
         case "/identity":
-          return handleIdentity(env);
-
+          return handleIdentity(
+            env
+          );
 
         case "/principles":
-          return handlePrinciples(env);
-
+          return handlePrinciples(
+            env
+          );
 
         case "/lessons":
-          return handleLessons(env);
-
+          return handleLessons(
+            env
+          );
 
         case "/development":
-          return handleDevelopment(env);
-
+          return handleDevelopment(
+            env
+          );
 
         case "/think":
           return handleThink(
@@ -1474,17 +1775,16 @@ export default {
             url
           );
 
-
         case "/decide":
           return handleDecide(
             env,
             url
           );
 
-
         case "/judgments":
-          return handleJudgments(env);
-
+          return handleJudgments(
+            env
+          );
 
         case "/review":
           return handleReview(
@@ -1492,13 +1792,11 @@ export default {
             url
           );
 
-
         case "/history":
           return handleHistory(
             env,
             url
           );
-
 
         case "/update-memory":
           return handleUpdateMemory(
@@ -1506,13 +1804,11 @@ export default {
             url
           );
 
-
         case "/challenge":
           return handleChallenge(
             env,
             url
           );
-
 
         case "/evidence":
           return handleEvidence(
@@ -1520,6 +1816,10 @@ export default {
             url
           );
 
+        case "/autolearn":
+          return handleAutonomousDevelopment(
+            env
+          );
 
         default:
           return json(
@@ -1541,5 +1841,40 @@ export default {
         500
       );
     }
+  },
+
+
+  /*
+    Cloudflare Cron Trigger.
+
+    Once a Cron Trigger is configured,
+    Aren can run this development cycle
+    without you opening the website.
+  */
+  async scheduled(
+    controller,
+    env,
+    ctx
+  ) {
+
+    try {
+
+      if (!env.AREN_DB) {
+        return;
+      }
+
+      ctx.waitUntil(
+        runAutonomousDevelopment(
+          env
+        )
+      );
+
+    } catch (_) {
+      /*
+        Scheduled development must not
+        crash the Worker.
+      */
+    }
   }
+
 };
