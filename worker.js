@@ -92,7 +92,7 @@ const CONCEPTS = {
     "respect",
     "human rights"
   ]
-});
+};
 
 
 function json(data, status = 200) {
@@ -219,21 +219,6 @@ function relevanceScore(situation, memoryText) {
     memoryText
   );
 
-  /*
-    Concept matches are stronger than ordinary
-    word matches.
-
-    This allows Aren to connect ideas such as:
-
-    "change an important principle"
-
-    with:
-
-    "make its own judgment"
-
-    while avoiding unrelated memories.
-  */
-
   const score =
     words +
     concepts.score * 3;
@@ -251,36 +236,44 @@ function relevanceScore(situation, memoryText) {
   Maturity represents how much weight a lesson
   should receive.
 
-  mature      = strong support
-  tested      = useful support
-  questioned  = still usable, but cautiously
-  new         = early lesson, also treated cautiously
+  mature      = 3
+  tested      = 2
+  questioned  = 1
+  new         = 1
 
   A questioned lesson is NOT rejected.
 */
 function maturityWeight(maturity) {
-  switch (
-    String(maturity || "").toLowerCase()
-  ) {
-    case "mature":
-      return 3;
+  const value =
+    String(maturity || "")
+      .trim()
+      .toLowerCase();
 
-    case "tested":
-      return 2;
-
-    case "questioned":
-      return 1;
-
-    case "new":
-    default:
-      return 1;
+  if (value === "mature") {
+    return 3;
   }
+
+  if (value === "tested") {
+    return 2;
+  }
+
+  if (value === "questioned") {
+    return 1;
+  }
+
+  return 1;
 }
 
 
 function lessonWeight(lesson) {
-  return maturityWeight(
-    lesson.maturity
+  const weight =
+    maturityWeight(
+      lesson?.maturity
+    );
+
+  return Math.max(
+    1,
+    Number(weight) || 1
   );
 }
 
