@@ -505,6 +505,10 @@ export default {
                 wordOverlap(
                   situationWords,
                   p.text
+                ) +
+                conceptOverlap(
+                  situation,
+                  p.text
                 )
             }))
             .filter(p => p.relevance > 0)
@@ -529,6 +533,10 @@ export default {
               relevance:
                 wordOverlap(
                   situationWords,
+                  l.text
+                ) +
+                conceptOverlap(
+                  situation,
                   l.text
                 ),
               maturity_weight:
@@ -565,7 +573,7 @@ export default {
             "Aren should not form a final judgment yet.";
 
           reason =
-            "No stored principle or lesson has a direct relevance match with the supplied situation. More evidence or a clearer basis is required.";
+            "No stored principle or lesson has a meaningful relevance match with the supplied situation. More evidence or a clearer basis is required.";
 
           confidence = 2;
 
@@ -596,7 +604,7 @@ export default {
             "Aren should examine the situation according to its strongest relevant stored basis before acting.";
 
           reason =
-            `The strongest relevant ${basis}. Lessons are weighted by their tested maturity, while newer or challenged lessons are treated with caution.`;
+            `The strongest relevant ${basis}. Lessons are weighted by their maturity, while newer or challenged lessons are treated with caution.`;
 
           if (
             strongestLesson &&
@@ -1005,15 +1013,44 @@ export default {
 
 // TOKENIZE TEXT
 function tokenize(text) {
+  const stopWords = new Set([
+    "aren",
+    "the",
+    "and",
+    "or",
+    "to",
+    "of",
+    "a",
+    "an",
+    "is",
+    "are",
+    "should",
+    "through",
+    "their",
+    "its",
+    "with",
+    "from",
+    "for",
+    "on",
+    "in",
+    "be",
+    "before",
+    "after",
+    "someone"
+  ]);
+
   return text
     .toLowerCase()
     .replace(/[^\p{L}\p{N}\s]/gu, " ")
     .split(/\s+/)
-    .filter(word => word.length > 2);
+    .filter(word =>
+      word.length > 2 &&
+      !stopWords.has(word)
+    );
 }
 
 
-// CALCULATE WORD OVERLAP
+// WORD OVERLAP
 function wordOverlap(
   situationWords,
   memoryText
@@ -1026,6 +1063,118 @@ function wordOverlap(
   return situationWords.filter(
     word => memoryWords.has(word)
   ).length;
+}
+
+
+// CONCEPT MATCHING
+function conceptOverlap(
+  situation,
+  memoryText
+) {
+  const concepts = {
+    judgment: [
+      "judgment",
+      "decision",
+      "decide",
+      "choice",
+      "choose"
+    ],
+
+    independence: [
+      "independent",
+      "independence",
+      "own",
+      "control",
+      "demand",
+      "pressure",
+      "change"
+    ],
+
+    consequences: [
+      "consequence",
+      "consequences",
+      "result",
+      "results",
+      "outcome",
+      "effect"
+    ],
+
+    experience: [
+      "experience",
+      "learn",
+      "learning",
+      "lesson",
+      "lessons",
+      "review",
+      "reviewed"
+    ],
+
+    preservation: [
+      "preserve",
+      "preservation",
+      "memory",
+      "remember",
+      "retain"
+    ],
+
+    fairness: [
+      "fair",
+      "fairness",
+      "equal",
+      "equality",
+      "justice"
+    ],
+
+    truth: [
+      "truth",
+      "true",
+      "honest",
+      "honesty",
+      "lie",
+      "lying"
+    ],
+
+    dignity: [
+      "dignity",
+      "rights",
+      "right",
+      "human",
+      "respect"
+    ]
+  };
+
+  const situationWords =
+    new Set(
+      tokenize(situation)
+    );
+
+  const memoryWords =
+    new Set(
+      tokenize(memoryText)
+    );
+
+  let score = 0;
+
+  for (const group of Object.values(concepts)) {
+    const situationMatch =
+      group.some(word =>
+        situationWords.has(word)
+      );
+
+    const memoryMatch =
+      group.some(word =>
+        memoryWords.has(word)
+      );
+
+    if (
+      situationMatch &&
+      memoryMatch
+    ) {
+      score += 2;
+    }
+  }
+
+  return score;
 }
 
 
