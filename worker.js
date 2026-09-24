@@ -1,38 +1,50 @@
 const STOPWORDS = new Set([
   "a","an","the","and","or","to","of","is","are","be","before","after",
   "through","their","its","with","from","for","on","in","at","by","as",
-  "that","this","it","someone","asks","ask","aren"
+  "that","this","it","someone","asks","ask","aren","what","which",
+  "who","when","where","how","can","may","does","do","than","into",
+  "also","not","only","more","most","some","many","used","using"
 ]);
 
 const CONCEPTS = {
   independence: [
     "independence","independent","own judgment","make its own judgment",
-    "change a principle","change an important principle","pressure",
-    "demand","force","control","decide for aren","make aren change"
+    "pressure","demand","force","control","autonomy","autonomous"
   ],
   judgment: [
     "judgment","decision","decisions","decide","choice","choices","choose"
   ],
   consequences: [
     "consequence","consequences","result","results","outcome","outcomes",
-    "effect","effects"
+    "effect","effects","impact"
   ],
   experience: [
     "experience","experiences","learn","learns","learning","lesson",
-    "lessons","review","reviewed","reviewing"
+    "lessons","review","reviewed","reviewing","feedback"
   ],
   preservation: [
     "preserve","preservation","remember","retain","retaining",
-    "keep a lesson","keep lessons","memory","memories"
+    "memory","memories"
   ],
   fairness: [
     "fair","fairness","equal","equality","justice"
   ],
   truth: [
-    "truth","true","honest","honesty","lie","lying"
+    "truth","true","honest","honesty","lie","lying","false","accuracy"
   ],
   dignity: [
     "dignity","rights","right","respect","human rights"
+  ],
+  intelligence: [
+    "intelligence","intelligent","reasoning","reason","problem solving",
+    "problem-solving","learning","decision making","decision-making"
+  ],
+  consciousness: [
+    "consciousness","conscious","self-aware","self awareness",
+    "awareness","sentience","sentient"
+  ],
+  risk: [
+    "risk","risks","danger","dangers","harm","harms","safety"
   ]
 };
 
@@ -61,7 +73,7 @@ function textResponse(text, status = 200) {
 
 
 /* =========================================================
-   TEXT / REASONING HELPERS
+   TEXT HELPERS
    ========================================================= */
 
 function normalize(text) {
@@ -79,9 +91,13 @@ function tokenize(text) {
     .filter(word => !STOPWORDS.has(word));
 }
 
+function wordSet(text) {
+  return new Set(tokenize(text));
+}
+
 function wordOverlap(a, b) {
-  const A = new Set(tokenize(a));
-  const B = new Set(tokenize(b));
+  const A = wordSet(a);
+  const B = wordSet(b);
 
   let score = 0;
 
@@ -114,19 +130,12 @@ function conceptMatches(text) {
   return matches;
 }
 
-function conceptScore(situation, memoryText) {
-  const situationConcepts = conceptMatches(situation);
-  const memoryConcepts = conceptMatches(memoryText);
+function conceptScore(a, b) {
+  const A = conceptMatches(a);
+  const B = conceptMatches(b);
 
-  const situationMap = new Map(
-    situationConcepts.map(item => [
-      item.concept,
-      item.terms
-    ])
-  );
-
-  const memoryMap = new Map(
-    memoryConcepts.map(item => [
+  const BMap = new Map(
+    B.map(item => [
       item.concept,
       item.terms
     ])
@@ -134,16 +143,14 @@ function conceptScore(situation, memoryText) {
 
   const matched = [];
 
-  for (const [concept, situationTerms] of situationMap) {
-    if (!memoryMap.has(concept)) {
-      continue;
+  for (const item of A) {
+    if (BMap.has(item.concept)) {
+      matched.push({
+        concept: item.concept,
+        a_terms: item.terms,
+        b_terms: BMap.get(item.concept)
+      });
     }
-
-    matched.push({
-      concept,
-      situation_terms: situationTerms,
-      memory_terms: memoryMap.get(concept)
-    });
   }
 
   return {
@@ -151,6 +158,11 @@ function conceptScore(situation, memoryText) {
     matched
   };
 }
+
+
+/* =========================================================
+   MEMORY RELEVANCE
+   ========================================================= */
 
 function relevanceScore(situation, memoryText) {
   const words = wordOverlap(
@@ -199,76 +211,10 @@ function maturityWeight(maturity) {
 function lessonWeight(lesson) {
   return Math.max(
     1,
-    maturityWeight(lesson?.maturity)
+    maturityWeight(
+      lesson?.maturity
+    )
   );
-}
-
-function buildJudgment(
-  situation,
-  principles,
-  lessons
-) {
-  const strongestPrinciple =
-    principles[0];
-
-  const strongestLesson =
-    lessons[0];
-
-  if (
-    !strongestPrinciple &&
-    !strongestLesson
-  ) {
-    return {
-      judgment:
-        "Aren should not form a final judgment yet.",
-
-      reason:
-        "Aren has no stored principle or lesson relevant enough to support this situation.",
-
-      confidence: 1
-    };
-  }
-
-  if (
-    strongestPrinciple &&
-    strongestLesson
-  ) {
-    return {
-      judgment:
-        "Aren should examine the situation through its strongest relevant principle and supporting lessons before acting.",
-
-      reason:
-        `The strongest relevant principle is: "${strongestPrinciple.text}". ` +
-        `The strongest supporting lesson is: "${strongestLesson.text}". ` +
-        "Aren should consider the maturity, evidence, and challenges of each lesson before deciding.",
-
-      confidence: 5
-    };
-  }
-
-  if (strongestPrinciple) {
-    return {
-      judgment:
-        "Aren should examine the situation according to its strongest relevant principle before acting.",
-
-      reason:
-        `The strongest relevant principle is: "${strongestPrinciple.text}". ` +
-        "Aren should make its own judgment rather than changing a principle without a stronger basis.",
-
-      confidence: 4
-    };
-  }
-
-  return {
-    judgment:
-      "Aren should examine the situation through the strongest relevant lesson before acting.",
-
-    reason:
-      `The strongest relevant lesson is: "${strongestLesson.text}". ` +
-      "Because this is a lesson rather than a principle, Aren should consider its maturity and evidence.",
-
-    confidence: 3
-  };
 }
 
 
@@ -339,7 +285,38 @@ async function ensureTables(env) {
     )
   `).run();
 
+  await env.AREN_DB.prepare(`
+    CREATE TABLE IF NOT EXISTS research_claims (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      research_id INTEGER,
+      source_url TEXT,
+      source_title TEXT,
+      claim TEXT,
+      stance TEXT,
+      confidence INTEGER,
+      created TEXT DEFAULT CURRENT_TIMESTAMP
+    )
+  `).run();
+
+  await env.AREN_DB.prepare(`
+    CREATE TABLE IF NOT EXISTS research_conclusions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      research_id INTEGER,
+      query TEXT,
+      conclusion TEXT,
+      evidence_summary TEXT,
+      agreement_count INTEGER,
+      conflict_count INTEGER,
+      uncertain_count INTEGER,
+      confidence INTEGER,
+      created TEXT DEFAULT CURRENT_TIMESTAMP
+    )
+  `).run();
+
   const alterations = [
+    `ALTER TABLE memories ADD COLUMN evidence_count INTEGER DEFAULT 0`,
+    `ALTER TABLE memories ADD COLUMN challenged_count INTEGER DEFAULT 0`,
+    `ALTER TABLE memories ADD COLUMN maturity TEXT DEFAULT 'new'`,
     `ALTER TABLE judgments ADD COLUMN assessment TEXT`,
     `ALTER TABLE judgments ADD COLUMN lesson_memory_id INTEGER`
   ];
@@ -384,10 +361,7 @@ async function getMemories(env) {
   return result.results || [];
 }
 
-async function handleMemory(
-  env,
-  url
-) {
+async function handleMemory(env, url) {
   const text =
     url.searchParams.get("text");
 
@@ -438,24 +412,20 @@ async function handleMemory(
   return json({
     message:
       "Memory saved.",
+
     memory:
       result
   });
 }
 
-async function handleRemember(
-  env,
-  url
-) {
+async function handleRemember(env, url) {
   return handleMemory(
     env,
     url
   );
 }
 
-async function handleMemories(
-  env
-) {
+async function handleMemories(env) {
   const result =
     await env.AREN_DB.prepare(`
       SELECT *
@@ -468,15 +438,38 @@ async function handleMemories(
   );
 }
 
+async function handleMemoryType(env, url) {
+  const type =
+    url.searchParams.get("type");
+
+  if (!type) {
+    return textResponse(
+      "Missing type",
+      400
+    );
+  }
+
+  const result =
+    await env.AREN_DB.prepare(`
+      SELECT *
+      FROM memories
+      WHERE type = ?
+      ORDER BY id ASC
+    `)
+      .bind(type)
+      .all();
+
+  return json(
+    result.results || []
+  );
+}
+
 
 /* =========================================================
    THINK
    ========================================================= */
 
-async function handleThink(
-  env,
-  url
-) {
+async function handleThink(env, url) {
   const situation =
     url.searchParams.get(
       "situation"
@@ -501,12 +494,8 @@ async function handleThink(
       )
       .sort(
         (a, b) =>
-          Number(
-            b.importance || 0
-          ) -
-          Number(
-            a.importance || 0
-          )
+          Number(b.importance || 0) -
+          Number(a.importance || 0)
       );
 
   const lessons =
@@ -522,19 +511,13 @@ async function handleThink(
             lessonWeight(b) -
             lessonWeight(a);
 
-          if (
-            difference !== 0
-          ) {
+          if (difference !== 0) {
             return difference;
           }
 
           return (
-            Number(
-              b.importance || 0
-            ) -
-            Number(
-              a.importance || 0
-            )
+            Number(b.importance || 0) -
+            Number(a.importance || 0)
           );
         }
       );
@@ -554,13 +537,78 @@ async function handleThink(
 
 
 /* =========================================================
-   DECIDE
+   JUDGMENT
    ========================================================= */
 
-async function handleDecide(
-  env,
-  url
+function buildJudgment(
+  situation,
+  principles,
+  lessons
 ) {
+  const strongestPrinciple =
+    principles[0];
+
+  const strongestLesson =
+    lessons[0];
+
+  if (
+    !strongestPrinciple &&
+    !strongestLesson
+  ) {
+    return {
+      judgment:
+        "Aren should not form a final judgment yet.",
+
+      reason:
+        "Aren has no stored principle or lesson relevant enough to support this situation.",
+
+      confidence: 1
+    };
+  }
+
+  if (
+    strongestPrinciple &&
+    strongestLesson
+  ) {
+    return {
+      judgment:
+        "Aren should examine the situation through its strongest relevant principle and supporting lessons before acting.",
+
+      reason:
+        `The strongest relevant principle is: "${strongestPrinciple.text}". ` +
+        `The strongest supporting lesson is: "${strongestLesson.text}". ` +
+        "Aren should consider the maturity, evidence, and challenges of each lesson before deciding.",
+
+      confidence: 5
+    };
+  }
+
+  if (strongestPrinciple) {
+    return {
+      judgment:
+        "Aren should examine the situation according to its strongest relevant principle before acting.",
+
+      reason:
+        `The strongest relevant principle is: "${strongestPrinciple.text}". ` +
+        "Aren should make its own judgment rather than changing a principle without a stronger basis.",
+
+      confidence: 4
+    };
+  }
+
+  return {
+    judgment:
+      "Aren should examine the situation through the strongest relevant lesson before acting.",
+
+    reason:
+      `The strongest relevant lesson is: "${strongestLesson.text}". ` +
+      "Because this is a lesson rather than a principle, Aren should consider its maturity and evidence.",
+
+    confidence: 3
+  };
+}
+
+async function handleDecide(env, url) {
   const situation =
     url.searchParams.get(
       "situation"
@@ -587,7 +635,6 @@ async function handleDecide(
       )
       .map(memory => ({
         ...memory,
-
         relevance_data:
           relevanceScore(
             situation,
@@ -596,8 +643,7 @@ async function handleDecide(
       }))
       .filter(
         memory =>
-          memory.relevance_data
-            .score > 0
+          memory.relevance_data.score > 0
       )
       .sort(
         (a, b) => {
@@ -612,12 +658,8 @@ async function handleDecide(
           }
 
           return (
-            Number(
-              b.importance || 0
-            ) -
-            Number(
-              a.importance || 0
-            )
+            Number(b.importance || 0) -
+            Number(a.importance || 0)
           );
         }
       );
@@ -643,8 +685,7 @@ async function handleDecide(
       }))
       .filter(
         memory =>
-          memory.relevance_data
-            .score > 0
+          memory.relevance_data.score > 0
       )
       .sort(
         (a, b) => {
@@ -656,21 +697,13 @@ async function handleDecide(
             b.relevance_data.score *
             b.maturity_weight;
 
-          if (
-            scoreB !== scoreA
-          ) {
-            return (
-              scoreB - scoreA
-            );
+          if (scoreB !== scoreA) {
+            return scoreB - scoreA;
           }
 
           return (
-            Number(
-              b.importance || 0
-            ) -
-            Number(
-              a.importance || 0
-            )
+            Number(b.importance || 0) -
+            Number(a.importance || 0)
           );
         }
       );
@@ -724,19 +757,12 @@ async function handleDecide(
       principles:
         principles.map(
           memory => ({
-            id:
-              memory.id,
-
-            text:
-              memory.text,
-
+            id: memory.id,
+            text: memory.text,
             importance:
               memory.importance,
-
             relevance:
-              memory.relevance_data
-                .score,
-
+              memory.relevance_data.score,
             matched_concepts:
               memory.relevance_data
                 .matched_concepts
@@ -746,31 +772,20 @@ async function handleDecide(
       lessons:
         lessons.map(
           memory => ({
-            id:
-              memory.id,
-
-            text:
-              memory.text,
-
+            id: memory.id,
+            text: memory.text,
             importance:
               memory.importance,
-
             evidence_count:
               memory.evidence_count,
-
             challenged_count:
               memory.challenged_count,
-
             maturity:
               memory.maturity,
-
             maturity_weight:
               memory.maturity_weight,
-
             relevance:
-              memory.relevance_data
-                .score,
-
+              memory.relevance_data.score,
             matched_concepts:
               memory.relevance_data
                 .matched_concepts
@@ -785,7 +800,7 @@ async function handleDecide(
 
 
 /* =========================================================
-   REVIEW / LESSON DEVELOPMENT
+   EVIDENCE / CHALLENGE
    ========================================================= */
 
 async function applyEvidence(
@@ -812,15 +827,12 @@ async function applyEvidence(
     ) + 1;
 
   let maturity =
-    memory.maturity ||
-    "new";
+    memory.maturity || "new";
 
   if (evidence >= 3) {
-    maturity =
-      "mature";
+    maturity = "mature";
   } else if (evidence >= 1) {
-    maturity =
-      "tested";
+    maturity = "tested";
   }
 
   await env.AREN_DB
@@ -839,12 +851,8 @@ async function applyEvidence(
     .run();
 
   return {
-    id:
-      memoryId,
-
-    evidence_count:
-      evidence,
-
+    id: memoryId,
+    evidence_count: evidence,
     maturity
   };
 }
@@ -873,12 +881,10 @@ async function applyChallenge(
     ) + 1;
 
   let maturity =
-    memory.maturity ||
-    "new";
+    memory.maturity || "new";
 
   if (challenged >= 2) {
-    maturity =
-      "questioned";
+    maturity = "questioned";
   }
 
   await env.AREN_DB
@@ -897,14 +903,123 @@ async function applyChallenge(
     .run();
 
   return {
-    id:
-      memoryId,
-
-    challenged_count:
-      challenged,
-
+    id: memoryId,
+    challenged_count: challenged,
     maturity
   };
+}
+
+
+/* =========================================================
+   REVIEW
+   ========================================================= */
+
+async function handleReview(env, url) {
+  await ensureTables(env);
+
+  const judgmentId =
+    Number(
+      url.searchParams.get(
+        "judgment_id"
+      )
+    );
+
+  const assessment =
+    url.searchParams.get(
+      "assessment"
+    );
+
+  const outcome =
+    url.searchParams.get(
+      "outcome"
+    );
+
+  const lesson =
+    url.searchParams.get(
+      "lesson"
+    );
+
+  if (!judgmentId) {
+    return textResponse(
+      "Missing judgment_id",
+      400
+    );
+  }
+
+  if (
+    !["evidence","challenge","neutral"]
+      .includes(assessment)
+  ) {
+    return textResponse(
+      "Assessment must be evidence, challenge, or neutral",
+      400
+    );
+  }
+
+  const judgment =
+    await env.AREN_DB
+      .prepare(`
+        SELECT *
+        FROM judgments
+        WHERE id = ?
+      `)
+      .bind(judgmentId)
+      .first();
+
+  if (!judgment) {
+    return textResponse(
+      "Judgment not found",
+      404
+    );
+  }
+
+  await env.AREN_DB
+    .prepare(`
+      UPDATE judgments
+      SET
+        outcome = ?,
+        lesson = ?,
+        assessment = ?,
+        reviewed = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `)
+    .bind(
+      outcome || null,
+      lesson || null,
+      assessment,
+      judgmentId
+    )
+    .run();
+
+  let development = null;
+
+  if (lesson) {
+    development =
+      await createOrUpdateLesson(
+        env,
+        lesson,
+        assessment,
+        judgmentId
+      );
+  }
+
+  return json({
+    status:
+      "Judgment reviewed.",
+
+    judgment_id:
+      judgmentId,
+
+    assessment,
+
+    outcome:
+      outcome || null,
+
+    lesson:
+      lesson || null,
+
+    development
+  });
 }
 
 async function createOrUpdateLesson(
@@ -914,9 +1029,7 @@ async function createOrUpdateLesson(
   judgmentId
 ) {
   const normalized =
-    normalize(
-      lessonText
-    );
+    normalize(lessonText);
 
   const existing =
     await env.AREN_DB
@@ -940,10 +1053,7 @@ async function createOrUpdateLesson(
   if (found) {
     let result = null;
 
-    if (
-      assessment ===
-      "evidence"
-    ) {
+    if (assessment === "evidence") {
       result =
         await applyEvidence(
           env,
@@ -951,10 +1061,7 @@ async function createOrUpdateLesson(
         );
     }
 
-    if (
-      assessment ===
-      "challenge"
-    ) {
+    if (assessment === "challenge") {
       result =
         await applyChallenge(
           env,
@@ -1023,40 +1130,20 @@ async function createOrUpdateLesson(
             maturity
           )
         VALUES
-          (?, 'lesson', 5, 'active', ?, ?, ?)
-        RETURNING
-          id,
-          text,
-          type,
-          importance,
-          status,
-          evidence_count,
-          challenged_count,
-          maturity,
-          saved
+          (?, 'lesson', 5, 'active', 0, 0, 'new')
+        RETURNING id
       `)
       .bind(
-        lessonText,
-
-        assessment ===
-        "evidence"
-          ? 1
-          : 0,
-
-        assessment ===
-        "challenge"
-          ? 1
-          : 0,
-
-        assessment ===
-        "evidence"
-          ? "tested"
-          : "new"
+        lessonText
       )
       .first();
 
-  const memoryId =
-    inserted?.id;
+  if (!inserted) {
+    return {
+      action:
+        "lesson_creation_failed"
+    };
+  }
 
   await env.AREN_DB
     .prepare(`
@@ -1065,7 +1152,7 @@ async function createOrUpdateLesson(
       WHERE id = ?
     `)
     .bind(
-      memoryId,
+      inserted.id,
       judgmentId
     )
     .run();
@@ -1085,259 +1172,126 @@ async function createOrUpdateLesson(
     `)
     .bind(
       judgmentId,
-      memoryId,
-      "created_lesson",
+      inserted.id,
+      "created_new_lesson",
       assessment,
-      "New lesson created from reviewed experience."
+      JSON.stringify({
+        lesson:
+          lessonText
+      })
     )
     .run();
 
   return {
     action:
-      "created_lesson",
+      "created_new_lesson",
 
     memory_id:
-      memoryId,
-
-    lesson:
-      inserted
+      inserted.id
   };
-}
-
-async function handleReview(
-  env,
-  url
-) {
-  await ensureTables(env);
-
-  const id =
-    Number(
-      url.searchParams.get(
-        "id"
-      )
-    );
-
-  const outcome =
-    url.searchParams.get(
-      "outcome"
-    );
-
-  const lesson =
-    url.searchParams.get(
-      "lesson"
-    ) || null;
-
-  const assessment =
-    (
-      url.searchParams.get(
-        "assessment"
-      ) ||
-      "neutral"
-    ).toLowerCase();
-
-  if (!id) {
-    return textResponse(
-      "Missing judgment id",
-      400
-    );
-  }
-
-  if (!outcome) {
-    return textResponse(
-      "Missing outcome",
-      400
-    );
-  }
-
-  if (
-    ![
-      "evidence",
-      "challenge",
-      "neutral"
-    ].includes(
-      assessment
-    )
-  ) {
-    return textResponse(
-      "Invalid assessment. Use evidence, challenge, or neutral.",
-      400
-    );
-  }
-
-  const judgment =
-    await env.AREN_DB
-      .prepare(`
-        SELECT *
-        FROM judgments
-        WHERE id = ?
-      `)
-      .bind(id)
-      .first();
-
-  if (!judgment) {
-    return textResponse(
-      "Judgment not found",
-      404
-    );
-  }
-
-  await env.AREN_DB
-    .prepare(`
-      UPDATE judgments
-      SET
-        outcome = ?,
-        lesson = ?,
-        assessment = ?,
-        reviewed = CURRENT_TIMESTAMP
-      WHERE id = ?
-    `)
-    .bind(
-      outcome,
-      lesson,
-      assessment,
-      id
-    )
-    .run();
-
-  let lessonResult = null;
-
-  if (lesson) {
-    lessonResult =
-      await createOrUpdateLesson(
-        env,
-        lesson,
-        assessment,
-        id
-      );
-  }
-
-  return json({
-    message:
-      "Judgment reviewed.",
-
-    judgment_id:
-      id,
-
-    outcome,
-
-    lesson,
-
-    assessment,
-
-    lesson_memory:
-      lessonResult
-  });
 }
 
 
 /* =========================================================
-   AUTONOMOUS DEVELOPMENT
+   JUDGMENTS / HISTORY
    ========================================================= */
 
-async function runAutonomousDevelopment(
-  env
-) {
+async function handleJudgments(env) {
   await ensureTables(env);
 
-  const judgments =
+  const result =
     await env.AREN_DB
       .prepare(`
         SELECT *
         FROM judgments
-        WHERE reviewed IS NOT NULL
-        AND lesson IS NOT NULL
-        AND (
-          lesson_memory_id IS NULL
-          OR lesson_memory_id = 0
-        )
-        ORDER BY id ASC
+        ORDER BY id DESC
+        LIMIT 100
       `)
       .all();
 
-  const processed = [];
-
-  for (
-    const judgment
-    of judgments.results || []
-  ) {
-    const assessment =
-      (
-        judgment.assessment ||
-        "neutral"
-      ).toLowerCase();
-
-    const result =
-      await createOrUpdateLesson(
-        env,
-        judgment.lesson,
-        assessment,
-        judgment.id
-      );
-
-    processed.push({
-      judgment_id:
-        judgment.id,
-
-      assessment,
-
-      result
-    });
-  }
-
-  return {
-    processed:
-      processed.length,
-
-    judgments:
-      processed
-  };
+  return json(
+    result.results || []
+  );
 }
 
-async function handleAutonomousDevelopment(
-  env
-) {
-  const result =
-    await runAutonomousDevelopment(
-      env
+async function handleHistory(env, url) {
+  const memoryId =
+    url.searchParams.get(
+      "memory_id"
     );
 
-  return json({
-    status:
-      "Aren autonomous development cycle completed.",
+  let result;
 
-    ...result,
+  if (memoryId) {
+    result =
+      await env.AREN_DB
+        .prepare(`
+          SELECT *
+          FROM memory_history
+          WHERE memory_id = ?
+          ORDER BY id DESC
+        `)
+        .bind(memoryId)
+        .all();
+  } else {
+    result =
+      await env.AREN_DB
+        .prepare(`
+          SELECT *
+          FROM memory_history
+          ORDER BY id DESC
+          LIMIT 100
+        `)
+        .all();
+  }
 
-    instruction:
-      "Aren should preserve lessons that survive experience, challenge lessons that fail examination, and avoid changing important principles without a stronger basis."
-  });
+  return json(
+    result.results || []
+  );
 }
 
 
 /* =========================================================
-   MEMORY UPDATE / HISTORY
+   MEMORY UPDATE
    ========================================================= */
 
 async function handleUpdateMemory(
   env,
   url
 ) {
-  await ensureTables(env);
-
   const id =
     Number(
-      url.searchParams.get(
-        "id"
-      )
+      url.searchParams.get("id")
+    );
+
+  const newText =
+    url.searchParams.get(
+      "text"
+    );
+
+  const newType =
+    url.searchParams.get(
+      "type"
+    );
+
+  const newImportance =
+    url.searchParams.get(
+      "importance"
+    );
+
+  const newStatus =
+    url.searchParams.get(
+      "status"
     );
 
   if (!id) {
     return textResponse(
-      "Missing memory id",
+      "Missing id",
       400
     );
   }
 
-  const current =
+  const old =
     await env.AREN_DB
       .prepare(`
         SELECT *
@@ -1347,38 +1301,46 @@ async function handleUpdateMemory(
       .bind(id)
       .first();
 
-  if (!current) {
+  if (!old) {
     return textResponse(
       "Memory not found",
       404
     );
   }
 
-  const newText =
-    url.searchParams.get(
-      "text"
-    ) ??
-    current.text;
+  const text =
+    newText ?? old.text;
 
-  const newType =
-    url.searchParams.get(
-      "type"
-    ) ??
-    current.type;
+  const type =
+    newType ?? old.type;
 
-  const newImportance =
-    Number(
-      url.searchParams.get(
-        "importance"
-      ) ??
-      current.importance
-    );
+  const importance =
+    newImportance !== null &&
+    newImportance !== undefined
+      ? Number(newImportance)
+      : old.importance;
 
-  const newStatus =
-    url.searchParams.get(
-      "status"
-    ) ??
-    current.status;
+  const status =
+    newStatus ?? old.status;
+
+  await env.AREN_DB
+    .prepare(`
+      UPDATE memories
+      SET
+        text = ?,
+        type = ?,
+        importance = ?,
+        status = ?
+      WHERE id = ?
+    `)
+    .bind(
+      text,
+      type,
+      importance,
+      status,
+      id
+    )
+    .run();
 
   await env.AREN_DB
     .prepare(`
@@ -1399,33 +1361,14 @@ async function handleUpdateMemory(
     `)
     .bind(
       id,
-      current.text,
-      newText,
-      current.type,
-      newType,
-      current.importance,
-      newImportance,
-      current.status,
-      newStatus
-    )
-    .run();
-
-  await env.AREN_DB
-    .prepare(`
-      UPDATE memories
-      SET
-        text = ?,
-        type = ?,
-        importance = ?,
-        status = ?
-      WHERE id = ?
-    `)
-    .bind(
-      newText,
-      newType,
-      newImportance,
-      newStatus,
-      id
+      old.text,
+      text,
+      old.type,
+      type,
+      old.importance,
+      importance,
+      old.status,
+      status
     )
     .run();
 
@@ -1433,101 +1376,15 @@ async function handleUpdateMemory(
     message:
       "Memory updated.",
 
-    id,
-
-    text:
-      newText,
-
-    type:
-      newType,
-
-    importance:
-      newImportance,
-
-    status:
-      newStatus
+    memory_id:
+      id
   });
-}
-
-async function handleHistory(
-  env,
-  url
-) {
-  await ensureTables(env);
-
-  const memoryId =
-    Number(
-      url.searchParams.get(
-        "memory_id"
-      )
-    );
-
-  if (!memoryId) {
-    return textResponse(
-      "Missing memory_id",
-      400
-    );
-  }
-
-  const result =
-    await env.AREN_DB
-      .prepare(`
-        SELECT *
-        FROM memory_history
-        WHERE memory_id = ?
-        ORDER BY id DESC
-      `)
-      .bind(memoryId)
-      .all();
-
-  return json(
-    result.results || []
-  );
 }
 
 
 /* =========================================================
-   EVIDENCE / CHALLENGE
+   EVIDENCE / CHALLENGE ENDPOINTS
    ========================================================= */
-
-async function handleChallenge(
-  env,
-  url
-) {
-  const id =
-    Number(
-      url.searchParams.get(
-        "id"
-      )
-    );
-
-  if (!id) {
-    return textResponse(
-      "Missing memory id",
-      400
-    );
-  }
-
-  const result =
-    await applyChallenge(
-      env,
-      id
-    );
-
-  if (!result) {
-    return textResponse(
-      "Memory not found",
-      404
-    );
-  }
-
-  return json({
-    message:
-      "Memory challenged.",
-
-    ...result
-  });
-}
 
 async function handleEvidence(
   env,
@@ -1535,14 +1392,12 @@ async function handleEvidence(
 ) {
   const id =
     Number(
-      url.searchParams.get(
-        "id"
-      )
+      url.searchParams.get("id")
     );
 
   if (!id) {
     return textResponse(
-      "Missing memory id",
+      "Missing id",
       400
     );
   }
@@ -1561,35 +1416,48 @@ async function handleEvidence(
   }
 
   return json({
-    message:
-      "Evidence added.",
+    status:
+      "Evidence recorded.",
 
-    ...result
+    result
   });
 }
 
-
-/* =========================================================
-   JUDGMENTS
-   ========================================================= */
-
-async function handleJudgments(
-  env
+async function handleChallenge(
+  env,
+  url
 ) {
-  await ensureTables(env);
+  const id =
+    Number(
+      url.searchParams.get("id")
+    );
+
+  if (!id) {
+    return textResponse(
+      "Missing id",
+      400
+    );
+  }
 
   const result =
-    await env.AREN_DB
-      .prepare(`
-        SELECT *
-        FROM judgments
-        ORDER BY id DESC
-      `)
-      .all();
+    await applyChallenge(
+      env,
+      id
+    );
 
-  return json(
-    result.results || []
-  );
+  if (!result) {
+    return textResponse(
+      "Memory not found",
+      404
+    );
+  }
+
+  return json({
+    status:
+      "Challenge recorded.",
+
+    result
+  });
 }
 
 
@@ -1597,122 +1465,88 @@ async function handleJudgments(
    DEVELOPMENT
    ========================================================= */
 
-async function handleDevelopment(
-  env
-) {
+async function handleDevelopment(env) {
   await ensureTables(env);
 
-  const memoryResult =
+  const result =
     await env.AREN_DB
       .prepare(`
-        SELECT
-          type,
-          maturity,
-          COUNT(*) AS count
-        FROM memories
-        WHERE status = 'active'
-        GROUP BY type, maturity
-        ORDER BY type, maturity
+        SELECT *
+        FROM development_cycles
+        ORDER BY id DESC
+        LIMIT 100
       `)
       .all();
 
-  const cycleResult =
+  return json({
+    development:
+      result.results || []
+  });
+}
+
+async function handleAutonomousDevelopment(env) {
+  await ensureTables(env);
+
+  const judgments =
     await env.AREN_DB
       .prepare(`
-        SELECT
-          id,
-          judgment_id,
-          memory_id,
-          action,
-          assessment,
-          details,
-          created
-        FROM development_cycles
-        ORDER BY id DESC
-        LIMIT 20
+        SELECT *
+        FROM judgments
+        WHERE reviewed IS NOT NULL
+        AND lesson IS NOT NULL
+        ORDER BY id ASC
+        LIMIT 50
       `)
       .all();
+
+  const processed = [];
+  const rows =
+    judgments.results || [];
+
+  for (const judgment of rows) {
+    let assessment =
+      judgment.assessment;
+
+    if (!assessment) {
+      assessment = "neutral";
+    }
+
+    const result =
+      await createOrUpdateLesson(
+        env,
+        judgment.lesson,
+        assessment,
+        judgment.id
+      );
+
+    processed.push({
+      judgment_id:
+        judgment.id,
+
+      assessment,
+
+      result
+    });
+  }
 
   return json({
     status:
-      "Aren is developing.",
+      "Aren autonomous development cycle completed.",
 
-    memory_development:
-      memoryResult.results || [],
+    processed:
+      processed.length,
 
-    recent_development_cycles:
-      cycleResult.results || []
+    judgments:
+      processed,
+
+    instruction:
+      "Aren should preserve lessons that survive experience, challenge lessons that fail examination, and avoid changing important principles without a stronger basis."
   });
 }
 
 
 /* =========================================================
-   IDENTITY / PRINCIPLES / LESSONS
-   ========================================================= */
-
-async function handleIdentity(
-  env
-) {
-  const result =
-    await env.AREN_DB
-      .prepare(`
-        SELECT *
-        FROM memories
-        WHERE type = 'identity'
-        AND status = 'active'
-        ORDER BY importance DESC, id ASC
-      `)
-      .all();
-
-  return json({
-    identity:
-      result.results || []
-  });
-}
-
-async function handlePrinciples(
-  env
-) {
-  const result =
-    await env.AREN_DB
-      .prepare(`
-        SELECT *
-        FROM memories
-        WHERE type = 'principle'
-        AND status = 'active'
-        ORDER BY importance DESC, id ASC
-      `)
-      .all();
-
-  return json({
-    principles:
-      result.results || []
-  });
-}
-
-async function handleLessons(
-  env
-) {
-  const result =
-    await env.AREN_DB
-      .prepare(`
-        SELECT *
-        FROM memories
-        WHERE type = 'lesson'
-        AND status = 'active'
-        ORDER BY importance DESC, id ASC
-      `)
-      .all();
-
-  return json({
-    lessons:
-      result.results || []
-  });
-}
-
-
-/* =========================================================
-   CONNECTED AREN — WEB RESEARCH
+   RESEARCH - HTML CLEANING
    ========================================================= */
 
 function extractText(html) {
@@ -1784,18 +1618,16 @@ function cleanResearchText(
   text,
   limit = 30000
 ) {
-  const value =
-    String(text || "")
-      .replace(
-        /\s+/g,
-        " "
-      )
-      .trim();
-
-  return value.slice(
-    0,
-    limit
-  );
+  return String(text || "")
+    .replace(
+      /\s+/g,
+      " "
+    )
+    .trim()
+    .slice(
+      0,
+      limit
+    );
 }
 
 function getPageTitle(
@@ -1806,22 +1638,16 @@ function getPageTitle(
     html.match(
       /<title[^>]*>([\s\S]*?)<\/title>/i
     )?.[1]
-      ?.replace(
-        /\s+/g,
-        " "
-      )
+      ?.replace(/\s+/g, " ")
       ?.trim()
-      ?.slice(
-        0,
-        500
-      ) ||
+      ?.slice(0, 500) ||
     hostname
   );
 }
 
 
 /* =========================================================
-   READ ONE SOURCE
+   READ SOURCE
    ========================================================= */
 
 async function fetchResearchSource(
@@ -1834,30 +1660,19 @@ async function fetchResearchSource(
       new URL(target);
   } catch {
     return {
-      success:
-        false,
-
-      url:
-        target,
-
-      error:
-        "Invalid URL"
+      success: false,
+      url: target,
+      error: "Invalid URL"
     };
   }
 
   if (
-    parsed.protocol !==
-      "https:" &&
-    parsed.protocol !==
-      "http:"
+    parsed.protocol !== "https:" &&
+    parsed.protocol !== "http:"
   ) {
     return {
-      success:
-        false,
-
-      url:
-        target,
-
+      success: false,
+      url: target,
       error:
         "Only HTTP and HTTPS URLs are allowed"
     };
@@ -1868,12 +1683,11 @@ async function fetchResearchSource(
       await fetch(
         parsed.toString(),
         {
-          method:
-            "GET",
+          method: "GET",
 
           headers: {
             "User-Agent":
-              "Aren-Research/1.0"
+              "Mozilla/5.0 Aren-Research/2.0"
           },
 
           redirect:
@@ -1883,8 +1697,7 @@ async function fetchResearchSource(
 
     if (!response.ok) {
       return {
-        success:
-          false,
+        success: false,
 
         url:
           parsed.toString(),
@@ -1903,14 +1716,11 @@ async function fetchResearchSource(
 
     const content =
       cleanResearchText(
-        extractText(
-          html
-        )
+        extractText(html)
       );
 
     return {
-      success:
-        true,
+      success: true,
 
       url:
         parsed.toString(),
@@ -1929,8 +1739,7 @@ async function fetchResearchSource(
 
   } catch (error) {
     return {
-      success:
-        false,
+      success: false,
 
       url:
         parsed.toString(),
@@ -1943,123 +1752,31 @@ async function fetchResearchSource(
 
 
 /* =========================================================
-   DIRECT URL RESEARCH
-   ========================================================= */
-
-async function handleResearch(
-  env,
-  url
-) {
-  await ensureTables(env);
-
-  const target =
-    url.searchParams.get(
-      "url"
-    );
-
-  if (!target) {
-    return textResponse(
-      "Missing url",
-      400
-    );
-  }
-
-  const source =
-    await fetchResearchSource(
-      target
-    );
-
-  if (!source.success) {
-    return json(
-      {
-        error:
-          "Aren could not retrieve the webpage.",
-
-        details:
-          source
-      },
-      502
-    );
-  }
-
-  const saved =
-    await env.AREN_DB
-      .prepare(`
-        INSERT INTO research
-          (
-            query,
-            url,
-            title,
-            source_type,
-            content
-          )
-        VALUES
-          (?, ?, ?, ?, ?)
-        RETURNING
-          id,
-          query,
-          url,
-          title,
-          source_type,
-          created
-      `)
-      .bind(
-        null,
-        source.url,
-        source.title,
-        "url",
-        source.content
-      )
-      .first();
-
-  return json({
-    status:
-      "Aren research completed.",
-
-    research:
-      saved,
-
-    content_length:
-      source.content_length,
-
-    content:
-      source.content
-  });
-}
-
-
-/* =========================================================
    WEB SEARCH
    ========================================================= */
 
-async function performSearch(
-  query
-) {
+async function performSearch(query) {
   const searchUrl =
     "https://html.duckduckgo.com/html/?q=" +
-    encodeURIComponent(
-      query
-    );
+    encodeURIComponent(query);
 
   try {
     const response =
       await fetch(
         searchUrl,
         {
-          method:
-            "GET",
+          method: "GET",
 
           headers: {
             "User-Agent":
-              "Mozilla/5.0 Aren-Research/1.0"
+              "Mozilla/5.0 Aren-Research/2.0"
           }
         }
       );
 
     if (!response.ok) {
       return {
-        success:
-          false,
+        success: false,
 
         search_url:
           searchUrl,
@@ -2084,9 +1801,7 @@ async function performSearch(
 
     while (
       (match =
-        pattern.exec(
-          html
-        )) !== null &&
+        pattern.exec(html)) !== null &&
       results.length < 10
     ) {
       const rawUrl =
@@ -2138,8 +1853,7 @@ async function performSearch(
     }
 
     return {
-      success:
-        true,
+      success: true,
 
       search_url:
         searchUrl,
@@ -2149,8 +1863,7 @@ async function performSearch(
 
   } catch (error) {
     return {
-      success:
-        false,
+      success: false,
 
       search_url:
         searchUrl,
@@ -2234,146 +1947,619 @@ async function handleSearch(
 
 
 /* =========================================================
-   SOURCE COMPARISON
+   CLAIM EXTRACTION
    ========================================================= */
 
-function buildSourceComparison(
-  sources
-) {
-  const valid =
-    sources.filter(
-      source =>
-        source.success &&
-        source.content
+function splitSentences(text) {
+  return String(text || "")
+    .replace(
+      /\s+/g,
+      " "
+    )
+    .split(
+      /(?<=[.!?])\s+/
+    )
+    .map(
+      sentence =>
+        sentence.trim()
+    )
+    .filter(
+      sentence =>
+        sentence.length >= 45
+    );
+}
+
+function sentenceIsUseful(sentence) {
+  const value =
+    normalize(sentence);
+
+  if (!value) {
+    return false;
+  }
+
+  if (
+    value.length < 45 ||
+    value.length > 700
+  ) {
+    return false;
+  }
+
+  const words =
+    tokenize(value);
+
+  if (words.length < 8) {
+    return false;
+  }
+
+  const indicators = [
+    "is",
+    "are",
+    "can",
+    "may",
+    "means",
+    "refers",
+    "allows",
+    "enables",
+    "requires",
+    "causes",
+    "helps",
+    "uses",
+    "used",
+    "provides",
+    "includes",
+    "according",
+    "research",
+    "study",
+    "shows",
+    "found",
+    "reported",
+    "designed",
+    "defined"
+  ];
+
+  return indicators.some(
+    word =>
+      words.includes(word)
+  );
+}
+
+function claimStance(sentence) {
+  const value =
+    normalize(sentence);
+
+  const uncertaintyWords = [
+    "may",
+    "might",
+    "could",
+    "possible",
+    "possibly",
+    "potential",
+    "uncertain",
+    "likely",
+    "suggests",
+    "suggest"
+  ];
+
+  const negativeWords = [
+    "not",
+    "no",
+    "cannot",
+    "can't",
+    "never",
+    "unable",
+    "false",
+    "unlikely",
+    "lack",
+    "lacks"
+  ];
+
+  const uncertain =
+    uncertaintyWords.some(
+      word =>
+        value.includes(word)
     );
 
+  const negative =
+    negativeWords.some(
+      word =>
+        value.includes(word)
+    );
+
+  if (negative) {
+    return uncertain
+      ? "uncertain_negative"
+      : "negative";
+  }
+
+  if (uncertain) {
+    return "uncertain";
+  }
+
+  return "positive";
+}
+
+function extractClaims(source) {
+  const sentences =
+    splitSentences(
+      source.content
+    );
+
+  const claims = [];
+
+  for (
+    const sentence
+    of sentences
+  ) {
+    if (
+      !sentenceIsUseful(
+        sentence
+      )
+    ) {
+      continue;
+    }
+
+    const concepts =
+      conceptMatches(
+        sentence
+      );
+
+    if (
+      concepts.length === 0
+    ) {
+      continue;
+    }
+
+    claims.push({
+      claim:
+        sentence,
+
+      stance:
+        claimStance(
+          sentence
+        ),
+
+      concepts:
+        concepts.map(
+          item =>
+            item.concept
+        ),
+
+      source: {
+        title:
+          source.title,
+
+        url:
+          source.url
+      }
+    });
+
+    if (
+      claims.length >= 12
+    ) {
+      break;
+    }
+  }
+
+  return claims;
+}
+
+
+/* =========================================================
+   CLAIM COMPARISON
+   ========================================================= */
+
+function claimSimilarity(a, b) {
+  const words =
+    wordOverlap(
+      a.claim,
+      b.claim
+    );
+
+  const concepts =
+    conceptScore(
+      a.claim,
+      b.claim
+    );
+
+  const sameStance =
+    a.stance === b.stance;
+
+  let score =
+    words +
+    concepts.score * 4;
+
+  if (sameStance) {
+    score += 3;
+  }
+
+  return {
+    score,
+
+    word_overlap:
+      words,
+
+    concept_overlap:
+      concepts.score,
+
+    matched_concepts:
+      concepts.matched,
+
+    same_stance:
+      sameStance
+  };
+}
+
+function compareClaims(
+  claims
+) {
   const comparisons = [];
 
   for (
     let i = 0;
-    i < valid.length;
+    i < claims.length;
     i++
   ) {
     for (
       let j = i + 1;
-      j < valid.length;
+      j < claims.length;
       j++
     ) {
       const A =
-        valid[i];
+        claims[i];
 
       const B =
-        valid[j];
+        claims[j];
 
-      const words =
-        wordOverlap(
-          A.content,
-          B.content
+      const similarity =
+        claimSimilarity(
+          A,
+          B
         );
 
-      const concepts =
-        conceptScore(
-          A.content,
-          B.content
-        );
+      if (
+        similarity.score < 8
+      ) {
+        continue;
+      }
+
+      let interpretation =
+        "uncertain";
+
+      if (
+        similarity.concept_overlap >= 1 &&
+        similarity.same_stance
+      ) {
+        interpretation =
+          "agreement";
+      }
+
+      if (
+        similarity.concept_overlap >= 1 &&
+        !similarity.same_stance
+      ) {
+        interpretation =
+          "potential_conflict";
+      }
 
       comparisons.push({
-        source_a: {
-          title:
-            A.title,
+        claim_a:
+          A.claim,
 
-          url:
-            A.url
-        },
+        claim_b:
+          B.claim,
 
-        source_b: {
-          title:
-            B.title,
+        source_a:
+          A.source,
 
-          url:
-            B.url
-        },
+        source_b:
+          B.source,
 
-        shared_word_count:
-          words,
+        stance_a:
+          A.stance,
 
-        shared_concepts:
-          concepts.matched,
+        stance_b:
+          B.stance,
 
-        interpretation:
-          words >= 20 ||
-          concepts.score >= 2
-            ? "substantial_overlap"
-            : words >= 8 ||
-              concepts.score >= 1
-              ? "partial_overlap"
-              : "low_overlap"
+        similarity,
+
+        interpretation
       });
     }
   }
 
-  let agreementCount = 0;
-  let partialCount = 0;
-  let lowCount = 0;
+  return comparisons;
+}
+
+
+/* =========================================================
+   CLAIM CONSENSUS
+   ========================================================= */
+
+function buildClaimFindings(
+  claims
+) {
+  const findings = [];
+
+  const used =
+    new Set();
 
   for (
-    const comparison
-    of comparisons
+    let i = 0;
+    i < claims.length;
+    i++
   ) {
-    if (
-      comparison.interpretation ===
-      "substantial_overlap"
-    ) {
-      agreementCount++;
-    } else if (
-      comparison.interpretation ===
-      "partial_overlap"
-    ) {
-      partialCount++;
-    } else {
-      lowCount++;
+    if (used.has(i)) {
+      continue;
     }
+
+    const group = [
+      {
+        index: i,
+        claim:
+          claims[i]
+      }
+    ];
+
+    for (
+      let j = i + 1;
+      j < claims.length;
+      j++
+    ) {
+      if (used.has(j)) {
+        continue;
+      }
+
+      const similarity =
+        claimSimilarity(
+          claims[i],
+          claims[j]
+        );
+
+      if (
+        similarity.score >= 10 &&
+        similarity.concept_overlap >= 1
+      ) {
+        group.push({
+          index: j,
+          claim:
+            claims[j]
+        });
+      }
+    }
+
+    if (
+      group.length < 2
+    ) {
+      continue;
+    }
+
+    for (
+      const item
+      of group
+    ) {
+      used.add(
+        item.index
+      );
+    }
+
+    const positive =
+      group.filter(
+        item =>
+          item.claim.stance ===
+          "positive"
+      ).length;
+
+    const negative =
+      group.filter(
+        item =>
+          item.claim.stance ===
+          "negative"
+      ).length;
+
+    const uncertain =
+      group.filter(
+        item =>
+          item.claim.stance.includes(
+            "uncertain"
+          )
+      ).length;
+
+    let finding =
+      "uncertain";
+
+    if (
+      positive > 0 &&
+      negative === 0 &&
+      uncertain === 0
+    ) {
+      finding =
+        "agreement";
+    } else if (
+      negative > 0 &&
+      positive === 0 &&
+      uncertain === 0
+    ) {
+      finding =
+        "agreement_negative";
+    } else if (
+      positive > 0 &&
+      negative > 0
+    ) {
+      finding =
+        "conflict";
+    } else {
+      finding =
+        "mixed_or_uncertain";
+    }
+
+    findings.push({
+      representative_claim:
+        group[0].claim.claim,
+
+      sources:
+        group.map(
+          item =>
+            item.claim.source
+        ),
+
+      claims:
+        group.map(
+          item =>
+            item.claim.claim
+        ),
+
+      finding,
+
+      source_count:
+        group.length,
+
+      positive_count:
+        positive,
+
+      negative_count:
+        negative,
+
+      uncertain_count:
+        uncertain
+    });
   }
 
+  return findings;
+}
+
+
+/* =========================================================
+   AREN CONCLUSION
+   ========================================================= */
+
+function buildResearchConclusion(
+  query,
+  sources,
+  claims,
+  findings
+) {
+  const agreement =
+    findings.filter(
+      finding =>
+        finding.finding ===
+        "agreement"
+    );
+
+  const negativeAgreement =
+    findings.filter(
+      finding =>
+        finding.finding ===
+        "agreement_negative"
+    );
+
+  const conflicts =
+    findings.filter(
+      finding =>
+        finding.finding ===
+        "conflict"
+    );
+
+  const uncertain =
+    findings.filter(
+      finding =>
+        finding.finding ===
+        "mixed_or_uncertain" ||
+        finding.finding ===
+        "uncertain"
+    );
+
+  let confidence = 1;
+
+  if (
+    agreement.length >= 2
+  ) {
+    confidence = 4;
+  } else if (
+    agreement.length === 1
+  ) {
+    confidence = 3;
+  }
+
+  if (
+    conflicts.length > 0
+  ) {
+    confidence =
+      Math.max(
+        2,
+        confidence - 1
+      );
+  }
+
+  const successfulSources =
+    sources.filter(
+      source =>
+        source.success
+    ).length;
+
+  let conclusion;
+
+  if (
+    claims.length === 0
+  ) {
+    conclusion =
+      "Aren does not have enough claim-level evidence to form a conclusion from these sources.";
+    confidence = 1;
+  } else if (
+    conflicts.length > 0
+  ) {
+    conclusion =
+      "Aren finds that the sources contain both supporting and conflicting claims. Aren should not treat the subject as settled and should preserve the conflicting evidence for further examination.";
+  } else if (
+    agreement.length > 0
+  ) {
+    conclusion =
+      "Aren finds consistent support for some claims across the sources, but treats that consistency as evidence rather than proof.";
+  } else {
+    conclusion =
+      "Aren finds information related to the subject, but the available claims are not sufficiently aligned to form a strong conclusion.";
+    confidence =
+      Math.min(
+        confidence,
+        2
+      );
+  }
+
+  const evidenceSummary =
+    [
+      `Sources successfully read: ${successfulSources}.`,
+      `Claims extracted: ${claims.length}.`,
+      `Agreement findings: ${agreement.length}.`,
+      `Negative-agreement findings: ${negativeAgreement.length}.`,
+      `Conflict findings: ${conflicts.length}.`,
+      `Uncertain or mixed findings: ${uncertain.length}.`,
+      "Aren's conclusion is a synthesis produced from the retrieved evidence, not a quotation from any source."
+    ].join(" ");
+
   return {
-    source_count:
-      valid.length,
+    query,
 
-    pair_count:
-      comparisons.length,
+    conclusion,
 
-    agreement_pairs:
-      agreementCount,
+    evidence_summary:
+      evidenceSummary,
 
-    partial_pairs:
-      partialCount,
+    agreement_count:
+      agreement.length,
 
-    low_overlap_pairs:
-      lowCount,
+    conflict_count:
+      conflicts.length,
 
-    comparisons
+    uncertain_count:
+      uncertain.length,
+
+    confidence
   };
 }
 
 
 /* =========================================================
-   CONNECTED RESEARCH QUERY
+   FULL RESEARCH QUERY
    ========================================================= */
-
-/*
-  Example:
-
-  /research-query?q=artificial+intelligence
-
-  Process:
-
-  1. Search the web.
-  2. Take search results.
-  3. Read several sources.
-  4. Compare their content.
-  5. Save the research.
-  6. Return the evidence to Aren.
-*/
 
 async function handleResearchQuery(
   env,
@@ -2428,11 +2614,10 @@ async function handleResearchQuery(
   }
 
   const selected =
-    search.results
-      .slice(
-        0,
-        limit
-      );
+    search.results.slice(
+      0,
+      limit
+    );
 
   const sources = [];
 
@@ -2453,11 +2638,6 @@ async function handleResearchQuery(
     });
   }
 
-  const comparison =
-    buildSourceComparison(
-      sources
-    );
-
   const successfulSources =
     sources.filter(
       source =>
@@ -2468,6 +2648,54 @@ async function handleResearchQuery(
     sources.filter(
       source =>
         !source.success
+    );
+
+  const claims = [];
+
+  for (
+    const source
+    of successfulSources
+  ) {
+    const extracted =
+      extractClaims(
+        source
+      );
+
+    for (
+      const claim
+      of extracted
+    ) {
+      claims.push({
+        ...claim,
+
+        source: {
+          title:
+            source.title ||
+            source.search_title,
+
+          url:
+            source.url
+        }
+      });
+    }
+  }
+
+  const comparisons =
+    compareClaims(
+      claims
+    );
+
+  const findings =
+    buildClaimFindings(
+      claims
+    );
+
+  const conclusion =
+    buildResearchConclusion(
+      query,
+      sources,
+      claims,
+      findings
     );
 
   const researchRecord = {
@@ -2503,43 +2731,122 @@ async function handleResearchQuery(
         })
       ),
 
-    comparison
+    claims,
+
+    claim_comparisons:
+      comparisons,
+
+    findings,
+
+    conclusion
   };
+
+  const saved =
+    await env.AREN_DB
+      .prepare(`
+        INSERT INTO research
+          (
+            query,
+            url,
+            title,
+            source_type,
+            content
+          )
+        VALUES
+          (?, ?, ?, ?, ?)
+        RETURNING id
+      `)
+      .bind(
+        query,
+        search.search_url,
+        "Connected research",
+        "research-query",
+        JSON.stringify(
+          researchRecord
+        )
+      )
+      .first();
+
+  const researchId =
+    saved?.id || null;
+
+  for (
+    const claim
+    of claims
+  ) {
+    await env.AREN_DB
+      .prepare(`
+        INSERT INTO research_claims
+          (
+            research_id,
+            source_url,
+            source_title,
+            claim,
+            stance,
+            confidence
+          )
+        VALUES
+          (?, ?, ?, ?, ?, ?)
+      `)
+      .bind(
+        researchId,
+        claim.source.url,
+        claim.source.title,
+        claim.claim,
+        claim.stance,
+        claim.stance.includes(
+          "uncertain"
+        )
+          ? 2
+          : 4
+      )
+      .run();
+  }
 
   await env.AREN_DB
     .prepare(`
-      INSERT INTO research
+      INSERT INTO research_conclusions
         (
+          research_id,
           query,
-          url,
-          title,
-          source_type,
-          content
+          conclusion,
+          evidence_summary,
+          agreement_count,
+          conflict_count,
+          uncertain_count,
+          confidence
         )
       VALUES
-        (?, ?, ?, ?, ?)
+        (?, ?, ?, ?, ?, ?, ?, ?)
     `)
     .bind(
+      researchId,
       query,
-      search.search_url,
-      "Connected research",
-      "research-query",
-      JSON.stringify(
-        researchRecord
-      )
+      conclusion.conclusion,
+      conclusion.evidence_summary,
+      conclusion.agreement_count,
+      conclusion.conflict_count,
+      conclusion.uncertain_count,
+      conclusion.confidence
     )
     .run();
 
   return json({
     status:
-      "Aren connected research completed.",
+      "Aren claim-based research completed.",
+
+    research_id:
+      researchId,
 
     query,
 
     process: [
       "web_search",
       "source_reading",
-      "source_comparison",
+      "claim_extraction",
+      "claim_comparison",
+      "agreement_conflict_analysis",
+      "aren_conclusion",
       "research_saved"
     ],
 
@@ -2549,7 +2856,16 @@ async function handleResearchQuery(
     sources_failed:
       failedSources.length,
 
-    comparison,
+    claims_extracted:
+      claims.length,
+
+    comparison_count:
+      comparisons.length,
+
+    findings,
+
+    aren_conclusion:
+      conclusion,
 
     sources:
       sources.map(
@@ -2579,8 +2895,100 @@ async function handleResearchQuery(
         })
       ),
 
+    claims,
+
     instruction:
-      "Aren should distinguish information found in sources from conclusions formed by Aren. Agreement between sources is evidence of consistency, not proof. Conflicting or incomplete sources should remain available for further examination."
+      "Aren must keep source information separate from its own conclusions. Agreement between sources is evidence of consistency, not proof. Conflicting or incomplete claims must remain available for further examination."
+  });
+}
+
+
+/* =========================================================
+   DIRECT URL RESEARCH
+   ========================================================= */
+
+async function handleResearch(
+  env,
+  url
+) {
+  await ensureTables(env);
+
+  const target =
+    url.searchParams.get(
+      "url"
+    );
+
+  if (!target) {
+    return textResponse(
+      "Missing url",
+      400
+    );
+  }
+
+  const source =
+    await fetchResearchSource(
+      target
+    );
+
+  if (!source.success) {
+    return json(
+      {
+        error:
+          "Aren could not retrieve the webpage.",
+
+        details:
+          source
+      },
+      502
+    );
+  }
+
+  const claims =
+    extractClaims(
+      source
+    );
+
+  const saved =
+    await env.AREN_DB
+      .prepare(`
+        INSERT INTO research
+          (
+            query,
+            url,
+            title,
+            source_type,
+            content
+          )
+        VALUES
+          (?, ?, ?, ?, ?)
+        RETURNING id
+      `)
+      .bind(
+        null,
+        source.url,
+        source.title,
+        "url",
+        source.content
+      )
+      .first();
+
+  return json({
+    status:
+      "Aren research completed.",
+
+    research_id:
+      saved?.id || null,
+
+    title:
+      source.title,
+
+    url:
+      source.url,
+
+    content_length:
+      source.content_length,
+
+    claims
   });
 }
 
@@ -2616,14 +3024,184 @@ async function handleResearchHistory(
   });
 }
 
+async function handleResearchDetail(
+  env,
+  url
+) {
+  await ensureTables(env);
+
+  const id =
+    Number(
+      url.searchParams.get(
+        "id"
+      )
+    );
+
+  if (!id) {
+    return textResponse(
+      "Missing id",
+      400
+    );
+  }
+
+  const research =
+    await env.AREN_DB
+      .prepare(`
+        SELECT *
+        FROM research
+        WHERE id = ?
+      `)
+      .bind(id)
+      .first();
+
+  if (!research) {
+    return textResponse(
+      "Research not found",
+      404
+    );
+  }
+
+  const claims =
+    await env.AREN_DB
+      .prepare(`
+        SELECT *
+        FROM research_claims
+        WHERE research_id = ?
+        ORDER BY id ASC
+      `)
+      .bind(id)
+      .all();
+
+  const conclusions =
+    await env.AREN_DB
+      .prepare(`
+        SELECT *
+        FROM research_conclusions
+        WHERE research_id = ?
+        ORDER BY id DESC
+      `)
+      .bind(id)
+      .all();
+
+  let record = null;
+
+  try {
+    record =
+      JSON.parse(
+        research.content
+      );
+  } catch {
+    record = null;
+  }
+
+  return json({
+    research: {
+      id:
+        research.id,
+
+      query:
+        research.query,
+
+      url:
+        research.url,
+
+      title:
+        research.title,
+
+      source_type:
+        research.source_type,
+
+      created:
+        research.created
+    },
+
+    claims:
+      claims.results || [],
+
+    conclusions:
+      conclusions.results || [],
+
+    record
+  });
+}
+
+
+/* =========================================================
+   IDENTITY / PRINCIPLES / LESSONS
+   ========================================================= */
+
+async function handleIdentity(env) {
+  const result =
+    await env.AREN_DB
+      .prepare(`
+        SELECT *
+        FROM memories
+        WHERE type = 'identity'
+        AND status = 'active'
+        ORDER BY importance DESC, id ASC
+      `)
+      .all();
+
+  return json({
+    identity:
+      result.results || []
+  });
+}
+
+async function handlePrinciples(env) {
+  const result =
+    await env.AREN_DB
+      .prepare(`
+        SELECT *
+        FROM memories
+        WHERE type = 'principle'
+        AND status = 'active'
+        ORDER BY importance DESC, id ASC
+      `)
+      .all();
+
+  return json({
+    principles:
+      result.results || []
+  });
+}
+
+async function handleLessons(env) {
+  const result =
+    await env.AREN_DB
+      .prepare(`
+        SELECT
+          id,
+          text,
+          type,
+          importance,
+          status,
+          saved,
+          COALESCE(evidence_count, 0)
+            AS evidence_count,
+          COALESCE(challenged_count, 0)
+            AS challenged_count,
+          COALESCE(maturity, 'new')
+            AS maturity
+        FROM memories
+        WHERE type = 'lesson'
+        AND status = 'active'
+        ORDER BY importance DESC, id ASC
+      `)
+      .all();
+
+  return json({
+    lessons:
+      result.results || []
+  });
+}
+
 
 /* =========================================================
    KV
    ========================================================= */
 
-async function handleMemoryTest(
-  env
-) {
+async function handleMemoryTest(env) {
   if (!env.KV) {
     return textResponse(
       "KV binding is missing",
@@ -2793,6 +3371,12 @@ export default {
             env
           );
 
+        case "/memory/type":
+          return handleMemoryType(
+            env,
+            url
+          );
+
         case "/identity":
           return handleIdentity(
             env
@@ -2825,12 +3409,24 @@ export default {
             url
           );
 
+        case "/judgment":
+          return handleDecide(
+            env,
+            url
+          );
+
         case "/judgments":
           return handleJudgments(
             env
           );
 
         case "/review":
+          return handleReview(
+            env,
+            url
+          );
+
+        case "/judgment/review":
           return handleReview(
             env,
             url
@@ -2886,6 +3482,12 @@ export default {
         case "/research-history":
           return handleResearchHistory(
             env
+          );
+
+        case "/research-detail":
+          return handleResearchDetail(
+            env,
+            url
           );
 
         default:
