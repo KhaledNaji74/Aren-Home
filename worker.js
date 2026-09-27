@@ -215,10 +215,7 @@ async function ensureTables(env) {
   `).run();
 
   /*
-   * Principle candidates are deliberately separate from principles.
-   *
-   * Aren may identify a lesson as worthy of consideration,
-   * but it must NOT automatically change an existing principle.
+   * Principle candidates remain separate from principles.
    */
   await env.AREN_DB.prepare(`
     CREATE TABLE IF NOT EXISTS principle_candidates (
@@ -227,6 +224,23 @@ async function ensureTables(env) {
       candidate_text TEXT NOT NULL,
       reason TEXT,
       status TEXT DEFAULT 'candidate',
+      created TEXT DEFAULT CURRENT_TIMESTAMP
+    )
+  `).run();
+
+  /*
+   * Candidate evaluations are separate from candidate status.
+   *
+   * Evaluating a candidate does NOT approve it.
+   */
+  await env.AREN_DB.prepare(`
+    CREATE TABLE IF NOT EXISTS principle_candidate_reviews (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      candidate_id INTEGER NOT NULL,
+      principle_id INTEGER,
+      relationship TEXT,
+      similarity REAL,
+      details TEXT,
       created TEXT DEFAULT CURRENT_TIMESTAMP
     )
   `).run();
@@ -289,9 +303,11 @@ async function handleRemember(env, url) {
   }
 
   const type = url.searchParams.get("type") || "memory";
+
   const importance = Number(
     url.searchParams.get("importance") || 5
   );
+
   const status =
     url.searchParams.get("status") || "active";
 
@@ -457,14 +473,6 @@ async function handleDecide(env, url) {
 
   const allLessons =
     await getMemories(env, "lesson");
-
-  /*
-   * Aren first ranks memories by relevance.
-   *
-   * Important:
-   * weak relevance does not remove a principle or lesson.
-   * Aren must retain access to its strongest active foundations.
-   */
 
   const rank = list => {
     return [...list].sort((a, b) => {
@@ -796,11 +804,6 @@ async function handleReview(env, url) {
     )
     .run();
 
-  /*
-   * Review records the result.
-   *
-   * Autonomous development is deliberately separate.
-   */
   return json({
     status:
       "Judgment reviewed.",
@@ -1266,20 +1269,8 @@ async function handleAutonomousDevelopment(
 
 /*
  * ============================================================
- * LESSON → PRINCIPLE CANDIDATE EVALUATION
+ * LESSON → PRINCIPLE CANDIDATE
  * ============================================================
- *
- * This is intentionally NOT automatic principle promotion.
- *
- * A lesson can become a candidate only when it has:
- *
- *   - mature maturity
- *   - at least 3 supporting evidence records
- *   - no unresolved challenges
- *
- * The candidate is stored separately.
- *
- * Existing principles are never changed here.
  */
 
 function candidateReason(lesson) {
@@ -1346,10 +1337,6 @@ async function handleEvaluateLessons(env) {
     const unresolvedChallenge =
       challenged > 0;
 
-    /*
-     * A mature lesson with unresolved challenges
-     * is not promoted to candidate status.
-     */
     if (
       !isMature ||
       !strongEnough ||
@@ -1377,10 +1364,6 @@ async function handleEvaluateLessons(env) {
       continue;
     }
 
-    /*
-     * Do not create a candidate if an active principle
-     * already contains the exact same normalized text.
-     */
     const alreadyPrinciple =
       principles.find(
         principle =>
@@ -1403,9 +1386,6 @@ async function handleEvaluateLessons(env) {
       continue;
     }
 
-    /*
-     * Check whether the candidate already exists.
-     */
     const existingCandidate =
       await env.AREN_DB
         .prepare(`
@@ -1520,6 +1500,252 @@ async function handlePrincipleCandidates(
         ORDER BY id DESC
         LIMIT 100
       `)
+      .all();
+
+  return json(
+    result.results || []
+  );
+}
+
+/*
+ * ============================================================
+ * PRINCIPLE CANDIDATE EVALUATION
+ * ============================================================
+ *
+ * This evaluates a candidate against existing principles.
+ *
+ * IMPORTANT:
+ * Evaluation does NOT:
+ *   - approve the candidate
+ *   - create a new principle
+ *   - delete a principle
+ *   - modify a principle
+ *   - change the candidate status
+ *
+ * It only produces reasoning data.
+ */
+
+async function handleEvaluatePrincipleCandidate(
+  env,
+  url
+) {
+  await ensureTables(env);
+
+  const candidateId =
+    Number(
+      url.searchParams.get("id")
+    );
+
+  if (!candidateId) {
+    return textResponse(
+      "Missing candidate id",
+      400
+    );
+  }
+
+  const candidate =
+    await env.AREN_DB
+      .prepare(`
+        SELECT *
+        FROM principle_candidates
+        WHERE id = ?
+      `)
+      .bind(candidateId)
+      .first();
+
+  if (!candidate) {
+    return textResponse(
+      "Principle candidate not found",
+      404
+    );
+  }
+
+  const lesson =
+    await env.AREN_DB
+      .prepare(`
+        SELECT *
+        FROM memories
+        WHERE id = ?
+      `)
+      .bind(candidate.lesson_id)
+      .first();
+
+  if (!lesson) {
+    return textResponse(
+      "Candidate lesson not found",
+      404
+    );
+  }
+
+  const principlesResult =
+    await env.AREN_DB
+      .prepare(`
+        SELECT *
+        FROM memories
+        WHERE type = 'principle'
+        AND status = 'active'
+        ORDER BY importance DESC, id ASC
+      `)
+      .all();
+
+  const principles =
+    principlesResult.results || [];
+
+  const evaluations = [];
+
+  for (const principle of principles) {
+    const words =
+      wordOverlap(
+        candidate.candidate_text,
+        principle.text
+      );
+
+    const concepts =
+      conceptScore(
+        candidate.candidate_text,
+        principle.text
+      );
+
+    const similarity =
+      Math.min(
+        1,
+        words * 0.65 +
+        concepts * 0.35
+      );
+
+    let relationship =
+      "independent";
+
+    if (similarity >= 0.75) {
+      relationship =
+        "highly_similar";
+    } else if (similarity >= 0.45) {
+      relationship =
+        "related";
+    } else if (similarity >= 0.20) {
+      relationship =
+        "weakly_related";
+    }
+
+    const details =
+      relationship === "highly_similar"
+        ? "Candidate is strongly similar to this existing principle and requires careful examination before any change."
+        : relationship === "related"
+          ? "Candidate shares meaningful concepts with this existing principle and should be examined for compatibility."
+          : relationship === "weakly_related"
+            ? "Candidate has limited conceptual overlap with this existing principle."
+            : "Candidate appears conceptually independent from this existing principle.";
+
+    await env.AREN_DB
+      .prepare(`
+        INSERT INTO principle_candidate_reviews
+        (
+          candidate_id,
+          principle_id,
+          relationship,
+          similarity,
+          details
+        )
+        VALUES (?, ?, ?, ?, ?)
+      `)
+      .bind(
+        candidateId,
+        principle.id,
+        relationship,
+        similarity,
+        details
+      )
+      .run();
+
+    evaluations.push({
+      principle_id:
+        principle.id,
+      principle_text:
+        principle.text,
+      importance:
+        principle.importance,
+      relationship,
+      similarity:
+        Number(similarity.toFixed(3)),
+      details
+    });
+  }
+
+  const strongest =
+    evaluations.length
+      ? [...evaluations].sort(
+          (a, b) =>
+            b.similarity -
+            a.similarity
+        )[0]
+      : null;
+
+  let recommendation =
+    "requires_human_review";
+
+  if (!principles.length) {
+    recommendation =
+      "no_existing_principles";
+  } else if (
+    strongest &&
+    strongest.similarity >= 0.75
+  ) {
+    recommendation =
+      "strong_overlap_requires_stronger_basis";
+  } else if (
+    strongest &&
+    strongest.similarity >= 0.45
+  ) {
+    recommendation =
+      "related_candidate_requires_review";
+  } else {
+    recommendation =
+      "candidate_is_not_strongly_overlapping";
+  }
+
+  return json({
+    status:
+      "Principle candidate evaluated.",
+    candidate,
+    lesson,
+    existing_principles:
+      principles,
+    evaluations,
+    strongest_comparison:
+      strongest,
+    recommendation,
+    rule:
+      "Evaluation does not approve, reject, replace, or modify any principle. An existing important principle must not be changed without a stronger basis."
+  });
+}
+
+async function handlePrincipleCandidateReviews(
+  env,
+  url
+) {
+  await ensureTables(env);
+
+  const candidateId =
+    Number(
+      url.searchParams.get("id")
+    );
+
+  if (!candidateId) {
+    return textResponse(
+      "Missing candidate id",
+      400
+    );
+  }
+
+  const result =
+    await env.AREN_DB
+      .prepare(`
+        SELECT *
+        FROM principle_candidate_reviews
+        WHERE candidate_id = ?
+        ORDER BY id DESC
+      `)
+      .bind(candidateId)
       .all();
 
   return json(
@@ -1962,6 +2188,7 @@ function homepage() {
 <a href="/autolearn">Autonomous Development</a>
 <a href="/evaluate-lessons">Evaluate Lessons</a>
 <a href="/principle-candidates">Principle Candidates</a>
+<a href="/evaluate-principle-candidate?id=1">Evaluate Candidate 1</a>
 <a href="/research-history">Research History</a>
 <a href="/memory-test">KV Memory Test</a>
 
@@ -1986,9 +2213,6 @@ export default {
       const path =
         url.pathname;
 
-      /*
-       * Database endpoints
-       */
       if (
         path !== "/" &&
         path !== "/memory-test" &&
@@ -2117,6 +2341,18 @@ export default {
         case "/principle-candidates":
           return handlePrincipleCandidates(
             env
+          );
+
+        case "/evaluate-principle-candidate":
+          return handleEvaluatePrincipleCandidate(
+            env,
+            url
+          );
+
+        case "/principle-candidate-reviews":
+          return handlePrincipleCandidateReviews(
+            env,
+            url
           );
 
         case "/research-search":
