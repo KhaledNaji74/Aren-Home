@@ -245,6 +245,23 @@ async function ensureTables(db) {
   `).run();
 
   await db.prepare(`
+    CREATE TABLE IF NOT EXISTS development_tasks (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      cycle_id INTEGER,
+      priority INTEGER DEFAULT 3,
+      type TEXT NOT NULL,
+      target_memory_id INTEGER,
+      related_memory_id INTEGER,
+      task TEXT NOT NULL,
+      reason TEXT,
+      status TEXT DEFAULT 'pending',
+      result TEXT,
+      created DATETIME DEFAULT CURRENT_TIMESTAMP,
+      completed DATETIME
+    )
+  `).run();
+
+  await db.prepare(`
     CREATE TABLE IF NOT EXISTS principle_candidates (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       lesson_id INTEGER,
@@ -1011,6 +1028,293 @@ async function handlePrincipleCandidates(db) {
   });
 }
 
+
+async function executeTestLesson(db, task) {
+  const lesson = await getMemoryById(db, task.target_memory_id);
+  if (!lesson || lesson.type !== "lesson") {
+    return { status: "skipped", reason: "Lesson not found." };
+  }
+
+  const rows = await db.prepare(\`
+    SELECT id, situation, judgment, assessment
+    FROM judgments
+    WHERE assessment IN ('evidence', 'challenge')
+    ORDER BY id DESC
+    LIMIT 30
+  \`).all();
+
+  let evidenceAdded = 0;
+  let challengesAdded = 0;
+
+  for (const judgment of rows.results || []) {
+    const source = String(judgment.situation || "") + " " + String(judgment.judgment || "");
+    if (relevanceScore(source, lesson) >= 0.35) {
+      if (judgment.assessment === "evidence") evidenceAdded++;
+      if (judgment.assessment === "challenge") challengesAdded++;
+    }
+  }
+
+  if (evidenceAdded || challengesAdded) {
+    const current = await getMemoryById(db, lesson.id);
+    const evidence = Number(current.evidence_count || 0) + evidenceAdded;
+    const challenged = Number(current.challenged_count || 0) + challengesAdded;
+    let maturity = current.maturity || "new";
+
+    if (challenged >= 2 && challenged >= evidence) maturity = "questioned";
+    else if (evidence >= 3 && challenged === 0) maturity = "mature";
+    else if (evidence >= 1) maturity = "tested";
+
+    await db.prepare(\`
+      UPDATE memories
+      SET evidence_count = ?, challenged_count = ?, maturity = ?
+      WHERE id = ?
+    \`).bind(evidence, challenged, maturity, lesson.id).run();
+
+    await db.prepare(\`
+      INSERT INTO memory_history (memory_id, event, details)
+      VALUES (?, 'development_test', ?)
+    \`).bind(
+      lesson.id,
+      "Autonomous test added " + evidenceAdded + " evidence and " + challengesAdded + " challenges."
+    ).run();
+
+    return {
+      status: "completed",
+      memory_id: lesson.id,
+      evidence_added: evidenceAdded,
+      challenges_added: challengesAdded,
+      evidence_count: evidence,
+      challenged_count: challenged,
+      maturity
+    };
+  }
+
+  return {
+    status: "completed",
+    memory_id: lesson.id,
+    evidence_added: 0,
+    challenges_added: 0,
+    finding: "No sufficiently relevant reviewed experience was found."
+  };
+}
+
+async function executeGatherEvidence(db, task) {
+  return executeTestLesson(db, task);
+}
+
+async function executeResolveTension(db, task) {
+  const a = await getMemoryById(db, task.target_memory_id);
+  const b = await getMemoryById(db, task.related_memory_id);
+
+  if (!a || !b) {
+    return { status: "skipped", reason: "One or both lessons were not found." };
+  }
+
+  const similarity = Number(
+    Math.max(wordOverlap(a.text, b.text), conceptScore(a.text, b.text)).toFixed(6)
+  );
+  const opposite =
+    normalize(a.text).includes("not") !== normalize(b.text).includes("not");
+
+  const finding =
+    similarity >= 0.45 && opposite
+      ? "Potential tension confirmed; both lessons remain unchanged."
+      : "No strong contradiction was confirmed by the current comparison.";
+
+  for (const item of [
+    [a.id, "Compared with lesson " + b.id + ". Similarity " + similarity + ". " + finding],
+    [b.id, "Compared with lesson " + a.id + ". Similarity " + similarity + ". " + finding]
+  ]) {
+    await db.prepare(\`
+      INSERT INTO memory_history (memory_id, event, details)
+      VALUES (?, 'tension_review', ?)
+    \`).bind(item[0], item[1]).run();
+  }
+
+  return {
+    status: "completed",
+    memory_ids: [a.id, b.id],
+    similarity,
+    finding
+  };
+}
+
+async function executePrincipleCandidate(db, task) {
+  const lesson = await getMemoryById(db, task.target_memory_id);
+
+  if (!lesson || lesson.type !== "lesson") {
+    return { status: "skipped", reason: "Lesson not found." };
+  }
+
+  if (
+    Number(lesson.evidence_count || 0) < 3 ||
+    Number(lesson.challenged_count || 0) !== 0 ||
+    lesson.maturity !== "mature"
+  ) {
+    return { status: "skipped", reason: "Lesson does not meet candidate requirements." };
+  }
+
+  const existing = await db.prepare(\`
+    SELECT id FROM principle_candidates WHERE lesson_id = ?
+  \`).bind(lesson.id).first();
+
+  if (existing) {
+    return { status: "completed", candidate_id: existing.id, created: false };
+  }
+
+  const reason =
+    "Mature lesson with repeated supporting evidence and no recorded challenges. Candidate only; no principle was changed.";
+
+  const result = await db.prepare(\`
+    INSERT INTO principle_candidates
+      (lesson_id, candidate_text, reason, status)
+    VALUES (?, ?, ?, 'candidate')
+  \`).bind(lesson.id, lesson.text, reason).run();
+
+  return {
+    status: "completed",
+    candidate_id: result.meta?.last_row_id || null,
+    lesson_id: lesson.id,
+    created: true,
+    principle_changed: false
+  };
+}
+
+async function executePrincipleReview(db, task) {
+  const principle = await getMemoryById(db, task.target_memory_id);
+
+  if (!principle || principle.type !== "principle") {
+    return { status: "skipped", reason: "Principle not found." };
+  }
+
+  const lessons = (await getMemories(db))
+    .filter(m => m.type === "lesson")
+    .map(m => ({ ...m, score: relevanceScore(principle.text, m) }))
+    .filter(m => m.score >= 0.30)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 10);
+
+  const finding = lessons.length
+    ? "Reviewed " + lessons.length + " related lessons. Principle remains unchanged."
+    : "No sufficiently related lessons were found. Principle remains unchanged.";
+
+  await db.prepare(\`
+    INSERT INTO development_cycles
+      (trigger, action, target_memory_id, reason, result, status)
+    VALUES (?, ?, ?, ?, ?, ?)
+  \`).bind(
+    "autonomous_development",
+    "review_principle",
+    principle.id,
+    "Review principle against related experience.",
+    JSON.stringify({ principle: principle.text, related_lessons: lessons, finding }),
+    "completed"
+  ).run();
+
+  return {
+    status: "completed",
+    principle_id: principle.id,
+    related_lessons: lessons.map(l => l.id),
+    finding,
+    principle_changed: false
+  };
+}
+
+async function executeDevelopmentTask(db, task) {
+  switch (task.type) {
+    case "test_lesson":
+    case "gather_evidence":
+      return executeTestLesson(db, task);
+    case "resolve_tension":
+      return executeResolveTension(db, task);
+    case "evaluate_principle_candidate":
+      return executePrincipleCandidate(db, task);
+    case "review_principle":
+      return executePrincipleReview(db, task);
+    default:
+      return { status: "skipped", reason: "Unknown task type: " + task.type };
+  }
+}
+
+async function handleExecuteDevelopment(db) {
+  const evaluationResponse = await handleSelfEvaluate(db);
+  const evaluation = await evaluationResponse.json();
+  const tasks = evaluation.next_development_tasks || [];
+  const cycleId = evaluation.cycle_id || null;
+  const executed = [];
+
+  for (const task of tasks) {
+    const insert = await db.prepare(\`
+      INSERT INTO development_tasks
+        (cycle_id, priority, type, target_memory_id, related_memory_id, task, reason, status)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 'running')
+    \`).bind(
+      cycleId,
+      Number(task.priority || 3),
+      task.type,
+      task.target_memory_id || null,
+      task.related_memory_id || null,
+      task.task || "",
+      task.reason || ""
+    ).run();
+
+    const taskId = insert.meta?.last_row_id || null;
+    let result;
+
+    try {
+      result = await executeDevelopmentTask(db, task);
+      await db.prepare(\`
+        UPDATE development_tasks
+        SET status = ?, result = ?, completed = CURRENT_TIMESTAMP
+        WHERE id = ?
+      \`).bind(
+        result.status === "completed" ? "completed" : "skipped",
+        JSON.stringify(result),
+        taskId
+      ).run();
+    } catch (error) {
+      result = {
+        status: "failed",
+        error: String(error?.message || error)
+      };
+
+      await db.prepare(\`
+        UPDATE development_tasks
+        SET status = 'failed', result = ?, completed = CURRENT_TIMESTAMP
+        WHERE id = ?
+      \`).bind(JSON.stringify(result), taskId).run();
+    }
+
+    executed.push({ task_id: taskId, task, result });
+  }
+
+  await db.prepare(\`
+    INSERT INTO development_cycles
+      (trigger, action, reason, result, status)
+    VALUES (?, ?, ?, ?, ?)
+  \`).bind(
+    "self_evaluation",
+    "execute_development_tasks",
+    "Aren executed its highest-priority self-evaluation tasks.",
+    JSON.stringify({
+      cycle_id: cycleId,
+      tasks_found: tasks.length,
+      tasks_executed: executed.length
+    }),
+    "completed"
+  ).run();
+
+  return json({
+    status: "Autonomous development executed.",
+    cycle_id: cycleId,
+    tasks_found: tasks.length,
+    tasks_executed: executed.length,
+    executed,
+    principle_changes: 0,
+    rule: "Principles are never changed automatically by the development executor."
+  });
+}
+
 async function handleDevelopment(db) {
   const result = await db.prepare(`
     SELECT *
@@ -1716,6 +2020,12 @@ export default {
 
       if (path === "/development") {
         return await handleDevelopment(
+          db
+        );
+      }
+
+      if (path === "/execute-development") {
+        return await handleExecuteDevelopment(
           db
         );
       }
