@@ -314,7 +314,13 @@ async function ensureTables(db) {
 
   try {
     await db.prepare(
-      `ALTER TABLE memory_history ADD COLUMN created DATETIME DEFAULT CURRENT_TIMESTAMP`
+      `ALTER TABLE memory_history ADD COLUMN created TEXT`
+    ).run();
+  } catch (_) {}
+
+  try {
+    await db.prepare(
+      `UPDATE memory_history SET created = CURRENT_TIMESTAMP WHERE created IS NULL`
     ).run();
   } catch (_) {}
 
@@ -404,8 +410,8 @@ async function saveMemory(db, text, type = "memory", importance = 5) {
   if (id) {
     await db.prepare(`
       INSERT INTO memory_history
-        (memory_id, event, details)
-      VALUES (?, 'created', ?)
+        (memory_id, event, details, created)
+      VALUES (?, 'created', ?, CURRENT_TIMESTAMP)
     `).bind(
       id,
       `Created as ${type}`
@@ -1723,8 +1729,8 @@ async function handleEvidence(db, url) {
 
   await db.prepare(`
     INSERT INTO memory_history
-      (memory_id, event, details)
-    VALUES (?, 'evidence', ?)
+      (memory_id, event, details, created)
+    VALUES (?, 'evidence', ?, CURRENT_TIMESTAMP)
   `).bind(
     memoryId,
     `Evidence count increased to ${evidence}`
@@ -1783,8 +1789,8 @@ async function handleChallenge(db, url) {
 
   await db.prepare(`
     INSERT INTO memory_history
-      (memory_id, event, details)
-    VALUES (?, 'challenge', ?)
+      (memory_id, event, details, created)
+    VALUES (?, 'challenge', ?, CURRENT_TIMESTAMP)
   `).bind(
     memoryId,
     `Challenge count increased to ${challenged}`
