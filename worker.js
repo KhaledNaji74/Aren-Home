@@ -1035,13 +1035,13 @@ async function executeTestLesson(db, task) {
     return { status: "skipped", reason: "Lesson not found." };
   }
 
-  const rows = await db.prepare(\`
+  const rows = await db.prepare(`
     SELECT id, situation, judgment, assessment
     FROM judgments
     WHERE assessment IN ('evidence', 'challenge')
     ORDER BY id DESC
     LIMIT 30
-  \`).all();
+  `).all();
 
   let evidenceAdded = 0;
   let challengesAdded = 0;
@@ -1064,16 +1064,16 @@ async function executeTestLesson(db, task) {
     else if (evidence >= 3 && challenged === 0) maturity = "mature";
     else if (evidence >= 1) maturity = "tested";
 
-    await db.prepare(\`
+    await db.prepare(`
       UPDATE memories
       SET evidence_count = ?, challenged_count = ?, maturity = ?
       WHERE id = ?
-    \`).bind(evidence, challenged, maturity, lesson.id).run();
+    `).bind(evidence, challenged, maturity, lesson.id).run();
 
-    await db.prepare(\`
+    await db.prepare(`
       INSERT INTO memory_history (memory_id, event, details)
       VALUES (?, 'development_test', ?)
-    \`).bind(
+    `).bind(
       lesson.id,
       "Autonomous test added " + evidenceAdded + " evidence and " + challengesAdded + " challenges."
     ).run();
@@ -1125,10 +1125,10 @@ async function executeResolveTension(db, task) {
     [a.id, "Compared with lesson " + b.id + ". Similarity " + similarity + ". " + finding],
     [b.id, "Compared with lesson " + a.id + ". Similarity " + similarity + ". " + finding]
   ]) {
-    await db.prepare(\`
+    await db.prepare(`
       INSERT INTO memory_history (memory_id, event, details)
       VALUES (?, 'tension_review', ?)
-    \`).bind(item[0], item[1]).run();
+    `).bind(item[0], item[1]).run();
   }
 
   return {
@@ -1154,9 +1154,9 @@ async function executePrincipleCandidate(db, task) {
     return { status: "skipped", reason: "Lesson does not meet candidate requirements." };
   }
 
-  const existing = await db.prepare(\`
+  const existing = await db.prepare(`
     SELECT id FROM principle_candidates WHERE lesson_id = ?
-  \`).bind(lesson.id).first();
+  `).bind(lesson.id).first();
 
   if (existing) {
     return { status: "completed", candidate_id: existing.id, created: false };
@@ -1165,11 +1165,11 @@ async function executePrincipleCandidate(db, task) {
   const reason =
     "Mature lesson with repeated supporting evidence and no recorded challenges. Candidate only; no principle was changed.";
 
-  const result = await db.prepare(\`
+  const result = await db.prepare(`
     INSERT INTO principle_candidates
       (lesson_id, candidate_text, reason, status)
     VALUES (?, ?, ?, 'candidate')
-  \`).bind(lesson.id, lesson.text, reason).run();
+  `).bind(lesson.id, lesson.text, reason).run();
 
   return {
     status: "completed",
@@ -1198,11 +1198,11 @@ async function executePrincipleReview(db, task) {
     ? "Reviewed " + lessons.length + " related lessons. Principle remains unchanged."
     : "No sufficiently related lessons were found. Principle remains unchanged.";
 
-  await db.prepare(\`
+  await db.prepare(`
     INSERT INTO development_cycles
       (trigger, action, target_memory_id, reason, result, status)
     VALUES (?, ?, ?, ?, ?, ?)
-  \`).bind(
+  `).bind(
     "autonomous_development",
     "review_principle",
     principle.id,
@@ -1244,11 +1244,11 @@ async function handleExecuteDevelopment(db) {
   const executed = [];
 
   for (const task of tasks) {
-    const insert = await db.prepare(\`
+    const insert = await db.prepare(`
       INSERT INTO development_tasks
         (cycle_id, priority, type, target_memory_id, related_memory_id, task, reason, status)
       VALUES (?, ?, ?, ?, ?, ?, ?, 'running')
-    \`).bind(
+    `).bind(
       cycleId,
       Number(task.priority || 3),
       task.type,
@@ -1263,11 +1263,11 @@ async function handleExecuteDevelopment(db) {
 
     try {
       result = await executeDevelopmentTask(db, task);
-      await db.prepare(\`
+      await db.prepare(`
         UPDATE development_tasks
         SET status = ?, result = ?, completed = CURRENT_TIMESTAMP
         WHERE id = ?
-      \`).bind(
+      `).bind(
         result.status === "completed" ? "completed" : "skipped",
         JSON.stringify(result),
         taskId
@@ -1278,21 +1278,21 @@ async function handleExecuteDevelopment(db) {
         error: String(error?.message || error)
       };
 
-      await db.prepare(\`
+      await db.prepare(`
         UPDATE development_tasks
         SET status = 'failed', result = ?, completed = CURRENT_TIMESTAMP
         WHERE id = ?
-      \`).bind(JSON.stringify(result), taskId).run();
+      `).bind(JSON.stringify(result), taskId).run();
     }
 
     executed.push({ task_id: taskId, task, result });
   }
 
-  await db.prepare(\`
+  await db.prepare(`
     INSERT INTO development_cycles
       (trigger, action, reason, result, status)
     VALUES (?, ?, ?, ?, ?)
-  \`).bind(
+  `).bind(
     "self_evaluation",
     "execute_development_tasks",
     "Aren executed its highest-priority self-evaluation tasks.",
