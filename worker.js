@@ -314,6 +314,12 @@ async function ensureTables(db) {
 
   try {
     await db.prepare(
+      `ALTER TABLE memory_history ADD COLUMN created DATETIME DEFAULT CURRENT_TIMESTAMP`
+    ).run();
+  } catch (_) {}
+
+  try {
+    await db.prepare(
       `ALTER TABLE memories ADD COLUMN evidence_count INTEGER DEFAULT 0`
     ).run();
   } catch (_) {}
