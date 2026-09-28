@@ -715,6 +715,105 @@ async function handleAutolearn(db) {
 
   It does NOT automatically rewrite principles.
 */
+
+async function filterRepeatedDevelopmentTasks(db, tasks) {
+  const filtered = [];
+
+  for (const task of tasks) {
+    const type = task.type;
+    const target = task.target_memory_id || null;
+    const related = task.related_memory_id || null;
+
+    const previous = await db.prepare(`
+      SELECT *
+      FROM development_tasks
+      WHERE type = ?
+        AND COALESCE(target_memory_id, 0) = COALESCE(?, 0)
+        AND COALESCE(related_memory_id, 0) = COALESCE(?, 0)
+        AND status = 'completed'
+      ORDER BY id DESC
+      LIMIT 1
+    `).bind(type, target, related).first();
+
+    if (!previous) {
+      filtered.push(task);
+      continue;
+    }
+
+    if (type === "test_lesson" || type === "gather_evidence") {
+      const pendingExperience = await db.prepare(`
+        SELECT COUNT(*) AS count
+        FROM judgments j
+        LEFT JOIN development_test_links l
+          ON l.lesson_id = ?
+          AND l.judgment_id = j.id
+        WHERE j.assessment IN ('evidence', 'challenge')
+          AND l.id IS NULL
+      `).bind(target).first();
+
+      if (Number(pendingExperience?.count || 0) > 0) {
+        filtered.push(task);
+      }
+
+      continue;
+    }
+
+    if (type === "evaluate_principle_candidate") {
+      const candidate = await db.prepare(`
+        SELECT id
+        FROM principle_candidates
+        WHERE lesson_id = ?
+        LIMIT 1
+      `).bind(target).first();
+
+      if (!candidate) {
+        filtered.push(task);
+      }
+
+      continue;
+    }
+
+    if (type === "resolve_tension") {
+      const changed = await db.prepare(`
+        SELECT COUNT(*) AS count
+        FROM memory_history
+        WHERE memory_id IN (?, ?)
+          AND created > COALESCE(?, '1970-01-01')
+      `).bind(target, related, previous.completed).first();
+
+      if (Number(changed?.count || 0) > 0) {
+        filtered.push(task);
+      }
+
+      continue;
+    }
+
+    if (type === "review_principle") {
+      const changed = await db.prepare(`
+        SELECT COUNT(*) AS count
+        FROM memory_history
+        WHERE memory_id IN (
+          SELECT id
+          FROM memories
+          WHERE type = 'lesson'
+            AND status = 'active'
+        )
+          AND created > COALESCE(?, '1970-01-01')
+      `).bind(previous.completed).first();
+
+      if (Number(changed?.count || 0) > 0) {
+        filtered.push(task);
+      }
+
+      continue;
+    }
+
+    filtered.push(task);
+  }
+
+  return filtered;
+}
+
 async function handleSelfEvaluate(db) {
   const memories = await getMemories(db);
 
@@ -932,6 +1031,12 @@ async function handleSelfEvaluate(db) {
     (a, b) => a.priority - b.priority
   );
 
+  // Do not repeat completed work unless a new condition or new experience exists.
+  const actionableTasks = await filterRepeatedDevelopmentTasks(
+    db,
+    developmentTasks
+  );
+
   // Keep the cycle in persistent memory.
   const cycleResult = await db.prepare(`
     INSERT INTO development_cycles
@@ -943,7 +1048,7 @@ async function handleSelfEvaluate(db) {
     "Aren inspected principles, lessons, evidence, challenges and possible tensions.",
     JSON.stringify({
       observations,
-      developmentTasks
+      developmentTasks: actionableTasks
     }),
     "completed"
   ).run();
@@ -958,7 +1063,7 @@ async function handleSelfEvaluate(db) {
       development_tasks: developmentTasks.length
     },
     observations,
-    next_development_tasks: developmentTasks.slice(0, 10)
+    next_development_tasks: actionableTasks.slice(0, 10)
   });
 }
 
