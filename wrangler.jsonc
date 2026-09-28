@@ -10,5 +10,11 @@
       "binding": "KV",
       "id": "41180744928f43ce8c599014cb460337"
     }
+  ],
+  "d1_databases": [
+    {
+      "binding": "AREN_DB",
+      "database_name": "Aren-DB"
+    }
   ]
 }
