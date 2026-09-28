@@ -19,8 +19,8 @@ const CONCEPTS = {
   dignity: ["dignity","respect","rights","human"],
   intelligence: ["intelligence","intelligent","reasoning"],
   consciousness: ["consciousness","existence","awareness","self"],
-  risk: ["risk","danger","uncertain","uncertainty","harm"]
-]);
+ risk: ["risk","danger","uncertain","uncertainty","harm"]
+};
 
 function json(data, status = 200) {
   return new Response(JSON.stringify(data, null, 2), {
