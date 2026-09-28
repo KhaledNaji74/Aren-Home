@@ -272,6 +272,46 @@ async function ensureTables(db) {
     )
   `).run();
 
+  await db.prepare(`
+    CREATE TABLE IF NOT EXISTS development_test_links (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      lesson_id INTEGER NOT NULL,
+      judgment_id INTEGER NOT NULL,
+      created DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(lesson_id, judgment_id)
+    )
+  `).run();
+
+  await db.prepare(`
+    CREATE TABLE IF NOT EXISTS schema_migrations (
+      name TEXT PRIMARY KEY,
+      created DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `).run();
+
+  const testingMigration = await db.prepare(`
+    SELECT name
+    FROM schema_migrations
+    WHERE name = 'seed_development_test_links_v1'
+  `).first();
+
+  if (!testingMigration) {
+    await db.prepare(`
+      INSERT OR IGNORE INTO development_test_links
+        (lesson_id, judgment_id)
+      SELECT m.id, j.id
+      FROM memories m
+      CROSS JOIN judgments j
+      WHERE m.type = 'lesson'
+        AND j.assessment IN ('evidence', 'challenge')
+    `).run();
+
+    await db.prepare(`
+      INSERT INTO schema_migrations (name)
+      VALUES ('seed_development_test_links_v1')
+    `).run();
+  }
+
   try {
     await db.prepare(
       `ALTER TABLE memories ADD COLUMN evidence_count INTEGER DEFAULT 0`
@@ -1036,51 +1076,106 @@ async function executeTestLesson(db, task) {
   }
 
   const rows = await db.prepare(`
-    SELECT id, situation, judgment, assessment
-    FROM judgments
-    WHERE assessment IN ('evidence', 'challenge')
-    ORDER BY id DESC
-    LIMIT 30
-  `).all();
+    SELECT j.id, j.situation, j.judgment, j.assessment
+    FROM judgments j
+    LEFT JOIN development_test_links l
+      ON l.lesson_id = ?
+      AND l.judgment_id = j.id
+    WHERE j.assessment IN ('evidence', 'challenge')
+      AND l.id IS NULL
+    ORDER BY j.id ASC
+  `).bind(lesson.id).all();
 
   let evidenceAdded = 0;
   let challengesAdded = 0;
+  let experiencesExamined = 0;
 
   for (const judgment of rows.results || []) {
-    const source = String(judgment.situation || "") + " " + String(judgment.judgment || "");
+    const source =
+      String(judgment.situation || "") +
+      " " +
+      String(judgment.judgment || "");
+
     if (relevanceScore(source, lesson) >= 0.35) {
-      if (judgment.assessment === "evidence") evidenceAdded++;
-      if (judgment.assessment === "challenge") challengesAdded++;
+      experiencesExamined++;
+
+      if (judgment.assessment === "evidence") {
+        evidenceAdded++;
+      }
+
+      if (judgment.assessment === "challenge") {
+        challengesAdded++;
+      }
+
+      await db.prepare(`
+        INSERT OR IGNORE INTO development_test_links
+          (lesson_id, judgment_id)
+        VALUES (?, ?)
+      `).bind(
+        lesson.id,
+        judgment.id
+      ).run();
     }
   }
 
   if (evidenceAdded || challengesAdded) {
     const current = await getMemoryById(db, lesson.id);
-    const evidence = Number(current.evidence_count || 0) + evidenceAdded;
-    const challenged = Number(current.challenged_count || 0) + challengesAdded;
+    const evidence =
+      Number(current.evidence_count || 0) +
+      evidenceAdded;
+
+    const challenged =
+      Number(current.challenged_count || 0) +
+      challengesAdded;
+
     let maturity = current.maturity || "new";
 
-    if (challenged >= 2 && challenged >= evidence) maturity = "questioned";
-    else if (evidence >= 3 && challenged === 0) maturity = "mature";
-    else if (evidence >= 1) maturity = "tested";
+    if (
+      challenged >= 2 &&
+      challenged >= evidence
+    ) {
+      maturity = "questioned";
+    } else if (
+      evidence >= 3 &&
+      challenged === 0
+    ) {
+      maturity = "mature";
+    } else if (evidence >= 1) {
+      maturity = "tested";
+    }
 
     await db.prepare(`
       UPDATE memories
-      SET evidence_count = ?, challenged_count = ?, maturity = ?
+      SET evidence_count = ?,
+          challenged_count = ?,
+          maturity = ?
       WHERE id = ?
-    `).bind(evidence, challenged, maturity, lesson.id).run();
+    `).bind(
+      evidence,
+      challenged,
+      maturity,
+      lesson.id
+    ).run();
 
     await db.prepare(`
-      INSERT INTO memory_history (memory_id, event, details)
+      INSERT INTO memory_history
+        (memory_id, event, details)
       VALUES (?, 'development_test', ?)
     `).bind(
       lesson.id,
-      "Autonomous test added " + evidenceAdded + " evidence and " + challengesAdded + " challenges."
+      "Autonomous test examined " +
+      experiencesExamined +
+      " new reviewed experiences and added " +
+      evidenceAdded +
+      " evidence and " +
+      challengesAdded +
+      " challenges."
     ).run();
 
     return {
       status: "completed",
       memory_id: lesson.id,
+      experiences_examined: experiencesExamined,
       evidence_added: evidenceAdded,
       challenges_added: challengesAdded,
       evidence_count: evidence,
@@ -1092,9 +1187,11 @@ async function executeTestLesson(db, task) {
   return {
     status: "completed",
     memory_id: lesson.id,
+    experiences_examined: experiencesExamined,
     evidence_added: 0,
     challenges_added: 0,
-    finding: "No sufficiently relevant reviewed experience was found."
+    finding:
+      "No new sufficiently relevant reviewed experience was found."
   };
 }
 
