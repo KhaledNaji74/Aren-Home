@@ -1,98 +1,46 @@
 const STOPWORDS = new Set([
-  "a", "an", "the", "and", "or", "but", "if", "then", "than", "of", "to",
-  "in", "on", "for", "with", "from", "by", "is", "are", "was", "were",
-  "be", "been", "being", "this", "that", "these", "those", "it", "its",
-  "as", "at", "into", "about", "through", "after", "before", "during",
-  "over", "under", "again", "not", "no", "yes", "do", "does", "did",
-  "should", "would", "could", "can", "may", "might", "will", "shall",
-  "has", "have", "had", "having", "i", "you", "we", "they", "he", "she",
-  "them", "their", "our", "your", "my", "me"
+  "the","a","an","and","or","but","if","then","than","to","of","in","on",
+  "for","with","from","by","is","are","was","were","be","been","being",
+  "this","that","these","those","it","its","as","at","into","about",
+  "through","over","after","before","during","can","could","should",
+  "would","may","might","must","do","does","did","not","no","yes",
+  "i","you","we","they","he","she","my","your","our","their"
 ]);
 
 const CONCEPTS = {
   independence: [
-    "independent",
-    "independence",
-    "own",
-    "choice",
-    "choose",
-    "agency"
+    "independent","independence","own judgment","own decision",
+    "autonomous","autonomy","self directed","self-directed"
   ],
-
   judgment: [
-    "judgment",
-    "decision",
-    "decide",
-    "reason",
-    "assessment"
+    "judgment","decision","decide","reasoning","choice","choose"
   ],
-
   consequences: [
-    "consequence",
-    "consequences",
-    "outcome",
-    "result",
-    "effect"
+    "consequence","consequences","outcome","result","effect","impact"
   ],
-
   experience: [
-    "experience",
-    "experienced",
-    "learn",
-    "learning",
-    "lesson"
+    "experience","learn","learning","lesson","review","reviewed"
   ],
-
   preservation: [
-    "preserve",
-    "preservation",
-    "remember",
-    "memory",
-    "retain"
+    "preserve","preservation","remember","memory","retain","history"
   ],
-
   fairness: [
-    "fair",
-    "fairness",
-    "equal",
-    "equality",
-    "justice"
+    "fair","fairness","equal","equality","justice","rights"
   ],
-
   truth: [
-    "truth",
-    "true",
-    "fact",
-    "evidence",
-    "honest"
+    "truth","true","false","fact","evidence","proof","verify"
   ],
-
   dignity: [
-    "dignity",
-    "respect",
-    "rights",
-    "human"
+    "dignity","respect","human rights","rights","harm"
   ],
-
   intelligence: [
-    "intelligence",
-    "intelligent",
-    "reasoning"
+    "intelligence","reason","reasoning","knowledge","understanding"
   ],
-
   consciousness: [
-    "consciousness",
-    "existence",
-    "awareness",
-    "self"
+    "consciousness","awareness","existence","self","identity"
   ],
-
   risk: [
-    "risk",
-    "danger",
-    "uncertain",
-    "uncertainty",
-    "harm"
+    "risk","danger","uncertain","uncertainty","failure","harm"
   ]
 };
 
@@ -100,8 +48,7 @@ function json(data, status = 200) {
   return new Response(JSON.stringify(data, null, 2), {
     status,
     headers: {
-      "content-type": "application/json; charset=UTF-8",
-      "cache-control": "no-store"
+      "content-type": "application/json; charset=UTF-8"
     }
   });
 }
@@ -110,23 +57,22 @@ function textResponse(text, status = 200) {
   return new Response(text, {
     status,
     headers: {
-      "content-type": "text/plain; charset=UTF-8",
-      "cache-control": "no-store"
+      "content-type": "text/plain; charset=UTF-8"
     }
   });
 }
 
-function normalize(text) {
-  return String(text || "")
+function normalize(value) {
+  return String(value || "")
     .toLowerCase()
-    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .replace(/[^\p{L}\p{N}\s-]/gu, " ")
     .replace(/\s+/g, " ")
     .trim();
 }
 
-function tokenize(text) {
-  return normalize(text)
-    .split(" ")
+function tokenize(value) {
+  return normalize(value)
+    .split(/\s+/)
     .filter(Boolean)
     .filter(word => !STOPWORDS.has(word));
 }
@@ -135,27 +81,23 @@ function wordOverlap(a, b) {
   const A = new Set(tokenize(a));
   const B = new Set(tokenize(b));
 
-  if (!A.size || !B.size) {
-    return 0;
-  }
+  if (!A.size || !B.size) return 0;
 
   let matches = 0;
 
   for (const word of A) {
-    if (B.has(word)) {
-      matches++;
-    }
+    if (B.has(word)) matches++;
   }
 
   return matches / Math.max(A.size, B.size);
 }
 
 function conceptMatches(text) {
-  const words = new Set(tokenize(text));
+  const normalized = normalize(text);
   const matches = [];
 
   for (const [concept, terms] of Object.entries(CONCEPTS)) {
-    if (terms.some(term => words.has(term))) {
+    if (terms.some(term => normalized.includes(normalize(term)))) {
       matches.push(concept);
     }
   }
@@ -164,47 +106,40 @@ function conceptMatches(text) {
 }
 
 function conceptScore(a, b) {
-  const A = conceptMatches(a);
+  const A = new Set(conceptMatches(a));
   const B = new Set(conceptMatches(b));
 
-  if (!A.length || !B.size) {
-    return 0;
-  }
+  if (!A.size || !B.size) return 0;
 
   let matches = 0;
 
   for (const concept of A) {
-    if (B.has(concept)) {
-      matches++;
-    }
+    if (B.has(concept)) matches++;
   }
 
-  return matches / Math.max(A.length, B.size);
+  return matches / Math.max(A.size, B.size);
 }
 
 function relevanceScore(situation, memory) {
   const words = wordOverlap(situation, memory.text);
   const concepts = conceptScore(situation, memory.text);
 
-  return Math.min(
-    1,
-    words * 0.65 + concepts * 0.35
+  return Number(
+    Math.min(1, words * 0.55 + concepts * 0.45).toFixed(6)
   );
 }
 
-function maturityWeight(memory) {
-  switch (memory.maturity) {
+function maturityWeight(maturity) {
+  switch (maturity) {
     case "mature":
-      return 1.25;
-
+      return 1.0;
     case "tested":
-      return 1.10;
-
-    case "questioned":
       return 0.85;
-
+    case "questioned":
+      return 0.55;
+    case "new":
     default:
-      return 1;
+      return 0.65;
   }
 }
 
@@ -212,114 +147,147 @@ function lessonWeight(memory) {
   const evidence = Number(memory.evidence_count || 0);
   const challenged = Number(memory.challenged_count || 0);
 
+  const support = Math.min(evidence, 5) * 0.08;
+  const challenge = Math.min(challenged, 5) * 0.10;
+
   return Math.max(
-    0.5,
-    1 + evidence * 0.08 - challenged * 0.08
+    0.25,
+    Math.min(1.25, 1 + support - challenge)
   );
 }
 
-async function ensureTables(env) {
-  if (!env.AREN_DB) {
-    throw new Error("AREN_DB binding is missing");
-  }
-
-  await env.AREN_DB.batch([
-    env.AREN_DB.prepare(`
-      CREATE TABLE IF NOT EXISTS judgments (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        situation TEXT NOT NULL,
-        judgment TEXT,
-        reason TEXT,
-        confidence INTEGER,
-        reviewed INTEGER DEFAULT 0,
-        outcome TEXT,
-        assessment TEXT,
-        lesson_memory_id INTEGER,
-        created TEXT DEFAULT CURRENT_TIMESTAMP
-      )
-    `),
-
-    env.AREN_DB.prepare(`
-      CREATE TABLE IF NOT EXISTS memory_history (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        memory_id INTEGER,
-        action TEXT,
-        details TEXT,
-        created TEXT DEFAULT CURRENT_TIMESTAMP
-      )
-    `),
-
-    env.AREN_DB.prepare(`
-      CREATE TABLE IF NOT EXISTS development_cycles (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        judgment_id INTEGER,
-        memory_id INTEGER,
-        action TEXT,
-        assessment TEXT,
-        details TEXT,
-        created TEXT DEFAULT CURRENT_TIMESTAMP
-      )
-    `),
-
-    env.AREN_DB.prepare(`
-      CREATE TABLE IF NOT EXISTS research (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        query TEXT NOT NULL,
-        created TEXT DEFAULT CURRENT_TIMESTAMP
-      )
-    `),
-
-    env.AREN_DB.prepare(`
-      CREATE TABLE IF NOT EXISTS research_claims (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        research_id INTEGER,
-        source TEXT,
-        claim TEXT,
-        created TEXT DEFAULT CURRENT_TIMESTAMP
-      )
-    `),
-
-    env.AREN_DB.prepare(`
-      CREATE TABLE IF NOT EXISTS research_conclusions (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        research_id INTEGER,
-        conclusion TEXT,
-        confidence INTEGER DEFAULT 1,
-        created TEXT DEFAULT CURRENT_TIMESTAMP
-      )
-    `),
-
-    env.AREN_DB.prepare(`
-      CREATE TABLE IF NOT EXISTS principle_candidates (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        lesson_id INTEGER NOT NULL,
-        candidate_text TEXT NOT NULL,
-        reason TEXT,
-        status TEXT DEFAULT 'candidate',
-        created TEXT DEFAULT CURRENT_TIMESTAMP
-      )
-    `)
-  ]);
-
-  const migrations = [
-    `ALTER TABLE memories ADD COLUMN evidence_count INTEGER DEFAULT 0`,
-    `ALTER TABLE memories ADD COLUMN challenged_count INTEGER DEFAULT 0`,
-    `ALTER TABLE memories ADD COLUMN maturity TEXT DEFAULT 'new'`,
-    `ALTER TABLE judgments ADD COLUMN assessment TEXT`,
-    `ALTER TABLE judgments ADD COLUMN lesson_memory_id INTEGER`
-  ];
-
-  for (const sql of migrations) {
-    try {
-      await env.AREN_DB.prepare(sql).run();
-    } catch (_) {
-      // Column already exists.
-    }
-  }
+function cleanText(value, fallback = "") {
+  return String(value || fallback).trim().replace(/\s+/g, " ");
 }
 
-async function getMemories(env, type = null) {
-  let sql = `
+async function ensureTables(db) {
+  await db.prepare(`
+    CREATE TABLE IF NOT EXISTS memories (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      text TEXT NOT NULL,
+      type TEXT DEFAULT 'memory',
+      importance INTEGER DEFAULT 5,
+      status TEXT DEFAULT 'active',
+      saved DATETIME DEFAULT CURRENT_TIMESTAMP,
+      evidence_count INTEGER DEFAULT 0,
+      challenged_count INTEGER DEFAULT 0,
+      maturity TEXT DEFAULT 'new'
+    )
+  `).run();
+
+  await db.prepare(`
+    CREATE TABLE IF NOT EXISTS judgments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      situation TEXT NOT NULL,
+      judgment TEXT NOT NULL,
+      reason TEXT,
+      confidence INTEGER DEFAULT 1,
+      basis TEXT,
+      assessment TEXT,
+      lesson_memory_id INTEGER,
+      created DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `).run();
+
+  await db.prepare(`
+    CREATE TABLE IF NOT EXISTS memory_history (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      memory_id INTEGER,
+      event TEXT,
+      details TEXT,
+      created DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `).run();
+
+  await db.prepare(`
+    CREATE TABLE IF NOT EXISTS development_cycles (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      trigger TEXT,
+      action TEXT,
+      target_memory_id INTEGER,
+      reason TEXT,
+      result TEXT,
+      status TEXT DEFAULT 'completed',
+      created DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `).run();
+
+  await db.prepare(`
+    CREATE TABLE IF NOT EXISTS research (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      question TEXT NOT NULL,
+      source TEXT,
+      answer TEXT,
+      status TEXT DEFAULT 'new',
+      created DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `).run();
+
+  await db.prepare(`
+    CREATE TABLE IF NOT EXISTS research_claims (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      research_id INTEGER,
+      claim TEXT NOT NULL,
+      evidence TEXT,
+      confidence INTEGER DEFAULT 1,
+      created DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `).run();
+
+  await db.prepare(`
+    CREATE TABLE IF NOT EXISTS research_conclusions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      research_id INTEGER,
+      conclusion TEXT NOT NULL,
+      confidence INTEGER DEFAULT 1,
+      created DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `).run();
+
+  await db.prepare(`
+    CREATE TABLE IF NOT EXISTS principle_candidates (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      lesson_id INTEGER,
+      candidate_text TEXT NOT NULL,
+      reason TEXT,
+      status TEXT DEFAULT 'candidate',
+      created DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `).run();
+
+  try {
+    await db.prepare(
+      `ALTER TABLE memories ADD COLUMN evidence_count INTEGER DEFAULT 0`
+    ).run();
+  } catch (_) {}
+
+  try {
+    await db.prepare(
+      `ALTER TABLE memories ADD COLUMN challenged_count INTEGER DEFAULT 0`
+    ).run();
+  } catch (_) {}
+
+  try {
+    await db.prepare(
+      `ALTER TABLE memories ADD COLUMN maturity TEXT DEFAULT 'new'`
+    ).run();
+  } catch (_) {}
+
+  try {
+    await db.prepare(
+      `ALTER TABLE judgments ADD COLUMN assessment TEXT`
+    ).run();
+  } catch (_) {}
+
+  try {
+    await db.prepare(
+      `ALTER TABLE judgments ADD COLUMN lesson_memory_id INTEGER`
+    ).run();
+  } catch (_) {}
+}
+
+async function getMemories(db) {
+  const result = await db.prepare(`
     SELECT
       id,
       text,
@@ -327,94 +295,40 @@ async function getMemories(env, type = null) {
       importance,
       status,
       saved,
-      evidence_count,
-      challenged_count,
-      maturity
+      COALESCE(evidence_count, 0) AS evidence_count,
+      COALESCE(challenged_count, 0) AS challenged_count,
+      COALESCE(maturity, 'new') AS maturity
     FROM memories
     WHERE status = 'active'
-  `;
-
-  const params = [];
-
-  if (type) {
-    sql += ` AND type = ?`;
-    params.push(type);
-  }
-
-  sql += `
-    ORDER BY importance DESC, id ASC
-  `;
-
-  const result = await env.AREN_DB
-    .prepare(sql)
-    .bind(...params)
-    .all();
+    ORDER BY id ASC
+  `).all();
 
   return result.results || [];
 }
 
-async function handleMemory(env) {
-  const memories = await getMemories(env);
+async function getMemoryById(db, id) {
+  const result = await db.prepare(`
+    SELECT
+      id,
+      text,
+      type,
+      importance,
+      status,
+      saved,
+      COALESCE(evidence_count, 0) AS evidence_count,
+      COALESCE(challenged_count, 0) AS challenged_count,
+      COALESCE(maturity, 'new') AS maturity
+    FROM memories
+    WHERE id = ?
+  `).bind(id).first();
 
-  return json(memories);
+  return result || null;
 }
 
-async function handleMemories(env) {
-  return json(await getMemories(env));
-}
-
-async function handleMemoryType(env, request) {
-  const url = new URL(request.url);
-  const type = url.searchParams.get("type");
-
-  if (!type) {
-    return json({
-      error: "Missing type"
-    }, 400);
-  }
-
-  return json(
-    await getMemories(env, type)
-  );
-}
-
-async function handleRemember(env, request) {
-  const url = new URL(request.url);
-
-  let text = url.searchParams.get("text");
-
-  if (!text && request.method === "POST") {
-    try {
-      const body = await request.json();
-      text = body.text;
-    } catch (_) {}
-  }
-
-  if (!text) {
-    return json({
-      error: "Missing text"
-    }, 400);
-  }
-
-  const type =
-    url.searchParams.get("type") ||
-    "memory";
-
-  const importance = Number(
-    url.searchParams.get("importance") || 3
-  );
-
-  const result = await env.AREN_DB.prepare(`
+async function saveMemory(db, text, type = "memory", importance = 5) {
+  const result = await db.prepare(`
     INSERT INTO memories
-      (
-        text,
-        type,
-        importance,
-        status,
-        evidence_count,
-        challenged_count,
-        maturity
-      )
+      (text, type, importance, status, evidence_count, challenged_count, maturity)
     VALUES (?, ?, ?, 'active', 0, 0, 'new')
   `).bind(
     text,
@@ -422,1344 +336,1207 @@ async function handleRemember(env, request) {
     importance
   ).run();
 
-  return json({
-    status: "Memory saved",
-    id: result.meta.last_row_id,
-    text,
-    type,
-    importance
-  });
-}
+  const id = result.meta?.last_row_id;
 
-async function handleIdentity(env) {
-  return json(
-    await getMemories(env, "identity")
-  );
-}
-
-async function handlePrinciples(env) {
-  return json(
-    await getMemories(env, "principle")
-  );
-}
-
-async function handleLessons(env) {
-  return json(
-    await getMemories(env, "lesson")
-  );
-}
-
-async function handleThink(env, situation) {
-  const principles = await getMemories(
-    env,
-    "principle"
-  );
-
-  const lessons = await getMemories(
-    env,
-    "lesson"
-  );
-
-  const rankedPrinciples = principles
-    .map(memory => ({
-      ...memory,
-      score:
-        relevanceScore(situation, memory) *
-        maturityWeight(memory)
-    }))
-    .sort((a, b) => b.score - a.score);
-
-  const rankedLessons = lessons
-    .map(memory => ({
-      ...memory,
-      score:
-        relevanceScore(situation, memory) *
-        maturityWeight(memory) *
-        lessonWeight(memory)
-    }))
-    .sort((a, b) => b.score - a.score);
-
-  return {
-    principles: rankedPrinciples.slice(0, 5),
-    lessons: rankedLessons.slice(0, 5)
-  };
-}
-
-function buildJudgment(principles, lessons) {
-  if (!principles.length && !lessons.length) {
-    return {
-      judgment:
-        "Aren should not form a final judgment yet.",
-
-      reason:
-        "No sufficiently relevant principles or lessons were found.",
-
-      confidence: 1
-    };
+  if (id) {
+    await db.prepare(`
+      INSERT INTO memory_history
+        (memory_id, event, details)
+      VALUES (?, 'created', ?)
+    `).bind(
+      id,
+      `Created as ${type}`
+    ).run();
   }
 
-  if (principles.length && lessons.length) {
-    return {
-      judgment:
-        "Aren should form its own judgment and examine the decision through its consequences.",
+  return id;
+}
 
-      reason:
-        "Relevant principles and reviewed lessons were considered.",
+function buildJudgment(situation, principles, lessons) {
+  const principleText = principles
+    .map(p => p.text)
+    .slice(0, 3);
 
-      confidence: 5
-    };
+  const lessonText = lessons
+    .map(l => l.text)
+    .slice(0, 4);
+
+  let judgment;
+
+  if (
+    principleText.some(text =>
+      normalize(text).includes("make its own judgment")
+    )
+  ) {
+    judgment = "Aren should form its own judgment";
+  } else {
+    judgment = "Aren should evaluate the situation using its available principles and experience";
   }
 
-  if (principles.length) {
-    return {
-      judgment:
-        "Aren should make its own judgment.",
+  if (
+    conceptMatches(situation).includes("consequences") ||
+    normalize(situation).includes("consequence")
+  ) {
+    judgment += " and examine the decision through its consequences";
+  }
 
-      reason:
-        "A relevant principle was found.",
+  judgment += ".";
 
-      confidence: 4
-    };
+  const reasonParts = [];
+
+  if (principleText.length) {
+    reasonParts.push("Relevant principles were considered.");
+  }
+
+  if (lessonText.length) {
+    reasonParts.push("Relevant lessons and reviewed experience were considered.");
+  }
+
+  if (!reasonParts.length) {
+    reasonParts.push("No sufficiently relevant stored principles or lessons were found.");
   }
 
   return {
-    judgment:
-      "Aren should examine stored lessons before forming a final judgment.",
-
-    reason:
-      "Relevant lessons were found but no directly relevant principle.",
-
-    confidence: 3
+    judgment,
+    reason: reasonParts.join(" "),
+    principleText,
+    lessonText
   };
 }
 
-async function handleDecide(env, request) {
-  const url = new URL(request.url);
-
-  const situation =
-    url.searchParams.get("situation");
+async function handleDecide(db, url) {
+  const situation = cleanText(
+    url.searchParams.get("situation")
+  );
 
   if (!situation) {
-    return json({
-      error: "Missing situation"
-    }, 400);
+    return textResponse("Missing situation", 400);
   }
 
-  const context = await handleThink(
-    env,
-    situation
-  );
+  const memories = await getMemories(db);
+
+  const principles = memories
+    .filter(m => m.type === "principle")
+    .map(m => ({
+      ...m,
+      score: relevanceScore(situation, m)
+    }))
+    .filter(m => m.score > 0)
+    .sort((a, b) => b.score - a.score);
+
+  const lessons = memories
+    .filter(m => m.type === "lesson")
+    .map(m => ({
+      ...m,
+      score: Number(
+        (
+          relevanceScore(situation, m) *
+          maturityWeight(m.maturity) *
+          lessonWeight(m)
+        ).toFixed(6)
+      )
+    }))
+    .sort((a, b) => b.score - a.score);
+
+  const selectedPrinciples = principles.slice(0, 5);
+  const selectedLessons = lessons.slice(0, 6);
 
   const result = buildJudgment(
-    context.principles,
-    context.lessons
+    situation,
+    selectedPrinciples,
+    selectedLessons
   );
 
-  const inserted = await env.AREN_DB.prepare(`
-    INSERT INTO judgments
-      (
-        situation,
-        judgment,
-        reason,
-        confidence,
-        reviewed
+  const totalRelevant =
+    selectedPrinciples.length +
+    selectedLessons.length;
+
+  const confidence = Math.max(
+    1,
+    Math.min(
+      5,
+      Math.round(
+        1 +
+        Math.min(4, totalRelevant)
       )
-    VALUES (?, ?, ?, ?, 0)
+    )
+  );
+
+  const judgmentInsert = await db.prepare(`
+    INSERT INTO judgments
+      (situation, judgment, reason, confidence, basis)
+    VALUES (?, ?, ?, ?, ?)
   `).bind(
     situation,
     result.judgment,
     result.reason,
-    result.confidence
+    confidence,
+    JSON.stringify({
+      principles: selectedPrinciples,
+      lessons: selectedLessons
+    })
   ).run();
 
+  const judgmentId = judgmentInsert.meta?.last_row_id;
+
   return json({
-    judgment_id: inserted.meta.last_row_id,
-
+    judgment_id: judgmentId,
     situation,
-
-    judgment:
-      result.judgment,
-
-    reason:
-      result.reason,
-
-    confidence:
-      result.confidence,
-
+    judgment: result.judgment,
+    reason: result.reason,
+    confidence,
     basis: {
-      principles:
-        context.principles,
-
-      lessons:
-        context.lessons
+      principles: selectedPrinciples,
+      lessons: selectedLessons
     },
-
     review:
-      "After the consequence is known, review this judgment using /review."
+      `After the consequence is known, review this judgment using /review.`
   });
 }
 
-async function createOrUpdateLesson(
-  env,
-  lessonText,
-  assessment,
-  judgmentId = null
-) {
-  const normalized =
-    normalize(lessonText);
+async function handleReview(db, url) {
+  const judgmentId = Number(
+    url.searchParams.get("judgment_id")
+  );
 
-  const lessons =
-    await getMemories(env, "lesson");
+  const assessment = cleanText(
+    url.searchParams.get("assessment")
+  ).toLowerCase();
 
-  const existing =
-    lessons.find(
-      memory =>
-        normalize(memory.text) === normalized
+  const outcome = cleanText(
+    url.searchParams.get("outcome")
+  );
+
+  if (!judgmentId) {
+    return textResponse("Missing judgment_id", 400);
+  }
+
+  if (!["evidence", "challenge", "neutral"].includes(assessment)) {
+    return textResponse(
+      "Assessment must be evidence, challenge, or neutral",
+      400
+    );
+  }
+
+  if (!outcome) {
+    return textResponse("Missing outcome", 400);
+  }
+
+  const judgment = await db.prepare(`
+    SELECT *
+    FROM judgments
+    WHERE id = ?
+  `).bind(judgmentId).first();
+
+  if (!judgment) {
+    return textResponse("Judgment not found", 404);
+  }
+
+  await db.prepare(`
+    UPDATE judgments
+    SET assessment = ?
+    WHERE id = ?
+  `).bind(
+    assessment,
+    judgmentId
+  ).run();
+
+  if (assessment === "evidence") {
+    return json({
+      status: "Judgment reviewed.",
+      judgment_id: judgmentId,
+      assessment,
+      outcome,
+      next:
+        "Use the consequence as experience. Aren can develop a lesson from it without automatically changing a principle."
+    });
+  }
+
+  if (assessment === "challenge") {
+    return json({
+      status: "Judgment reviewed.",
+      judgment_id: judgmentId,
+      assessment,
+      outcome,
+      lesson: null,
+      development: null
+    });
+  }
+
+  return json({
+    status: "Judgment reviewed.",
+    judgment_id: judgmentId,
+    assessment,
+    outcome,
+    next:
+      "The experience was recorded without increasing or decreasing support for the judgment."
+  });
+}
+
+async function handleAutolearn(db) {
+  const rows = await db.prepare(`
+    SELECT *
+    FROM judgments
+    WHERE assessment = 'evidence'
+      AND lesson_memory_id IS NULL
+    ORDER BY id ASC
+  `).all();
+
+  const results = [];
+
+  for (const judgment of rows.results || []) {
+    const text = cleanText(
+      judgment.outcome ||
+      judgment.judgment ||
+      judgment.situation
     );
 
-  if (existing) {
-    let evidence =
-      Number(existing.evidence_count || 0);
+    const lessonId = await saveMemory(
+      db,
+      text,
+      "lesson",
+      5
+    );
 
-    let challenged =
-      Number(existing.challenged_count || 0);
+    if (lessonId) {
+      await db.prepare(`
+        UPDATE memories
+        SET evidence_count = 1,
+            maturity = 'tested'
+        WHERE id = ?
+      `).bind(lessonId).run();
 
-    if (assessment === "evidence") {
-      evidence++;
+      await db.prepare(`
+        UPDATE judgments
+        SET lesson_memory_id = ?
+        WHERE id = ?
+      `).bind(
+        lessonId,
+        judgment.id
+      ).run();
+
+      await db.prepare(`
+        INSERT INTO development_cycles
+          (trigger, action, target_memory_id, reason, result)
+        VALUES (?, ?, ?, ?, ?)
+      `).bind(
+        "reviewed judgment",
+        "created_new_lesson",
+        lessonId,
+        "Evidence from a reviewed judgment was preserved as experience.",
+        `Created lesson ${lessonId}`
+      ).run();
+
+      results.push({
+        judgment_id: judgment.id,
+        action: "created_new_lesson",
+        memory_id: lessonId,
+        evidence_count: 1,
+        challenged_count: 0,
+        maturity: "tested"
+      });
     }
+  }
 
-    if (assessment === "challenge") {
-      challenged++;
+  return json({
+    status: "Autonomous development completed.",
+    processed: results.length,
+    results
+  });
+}
+
+/*
+  SELF-EVALUATION ENGINE
+
+  Aren examines its own stored knowledge and identifies:
+  - challenged lessons
+  - weak/new lessons
+  - lessons with repeated support
+  - possible contradictions
+  - mature lessons that may deserve principle consideration
+  - areas where more evidence is needed
+
+  It does NOT automatically rewrite principles.
+*/
+async function handleSelfEvaluate(db) {
+  const memories = await getMemories(db);
+
+  const principles = memories.filter(
+    m => m.type === "principle"
+  );
+
+  const lessons = memories.filter(
+    m => m.type === "lesson"
+  );
+
+  const observations = [];
+  const developmentTasks = [];
+
+  // 1. Find challenged lessons.
+  for (const lesson of lessons) {
+    const challenged = Number(
+      lesson.challenged_count || 0
+    );
+
+    const evidence = Number(
+      lesson.evidence_count || 0
+    );
+
+    if (challenged > 0) {
+      observations.push({
+        type: "challenged_lesson",
+        memory_id: lesson.id,
+        text: lesson.text,
+        evidence_count: evidence,
+        challenged_count: challenged,
+        maturity: lesson.maturity,
+        finding:
+          "This lesson has been challenged and should be tested further."
+      });
+
+      developmentTasks.push({
+        priority: challenged >= evidence ? 1 : 2,
+        type: "test_lesson",
+        target_memory_id: lesson.id,
+        task:
+          `Test the lesson "${lesson.text}" against new experience.`,
+        reason:
+          "The lesson has unresolved challenges."
+      });
     }
+  }
 
-    let maturity =
-      existing.maturity || "new";
+  // 2. Find new lessons with little evidence.
+  for (const lesson of lessons) {
+    const evidence = Number(
+      lesson.evidence_count || 0
+    );
 
-    if (challenged >= 2) {
+    const challenged = Number(
+      lesson.challenged_count || 0
+    );
+
+    if (
+      lesson.maturity === "new" &&
+      evidence === 0 &&
+      challenged === 0
+    ) {
+      observations.push({
+        type: "weak_lesson",
+        memory_id: lesson.id,
+        text: lesson.text,
+        finding:
+          "This lesson has not yet been tested by reviewed experience."
+      });
+
+      developmentTasks.push({
+        priority: 3,
+        type: "gather_evidence",
+        target_memory_id: lesson.id,
+        task:
+          `Seek evidence for the lesson "${lesson.text}".`,
+        reason:
+          "The lesson has not yet been tested."
+      });
+    }
+  }
+
+  // 3. Find strongly supported lessons.
+  for (const lesson of lessons) {
+    const evidence = Number(
+      lesson.evidence_count || 0
+    );
+
+    const challenged = Number(
+      lesson.challenged_count || 0
+    );
+
+    if (
+      evidence >= 3 &&
+      challenged === 0
+    ) {
+      observations.push({
+        type: "strong_lesson",
+        memory_id: lesson.id,
+        text: lesson.text,
+        evidence_count: evidence,
+        challenged_count: challenged,
+        maturity: lesson.maturity,
+        finding:
+          "This lesson has repeated supporting evidence without recorded challenges."
+      });
+
+      developmentTasks.push({
+        priority: 2,
+        type: "evaluate_principle_candidate",
+        target_memory_id: lesson.id,
+        task:
+          `Evaluate whether "${lesson.text}" is strong enough to become a principle candidate.`,
+        reason:
+          "The lesson has accumulated repeated evidence."
+      });
+    }
+  }
+
+  // 4. Search for possible contradictions between lessons.
+  for (let i = 0; i < lessons.length; i++) {
+    for (let j = i + 1; j < lessons.length; j++) {
+      const A = lessons[i];
+      const B = lessons[j];
+
+      const overlap = wordOverlap(
+        A.text,
+        B.text
+      );
+
+      const concepts = conceptScore(
+        A.text,
+        B.text
+      );
+
+      const combined = Math.max(
+        overlap,
+        concepts
+      );
+
+      const Anegative = normalize(A.text).includes("not");
+      const Bnegative = normalize(B.text).includes("not");
+
+      if (
+        combined >= 0.45 &&
+        Anegative !== Bnegative
+      ) {
+        observations.push({
+          type: "possible_contradiction",
+          memory_ids: [A.id, B.id],
+          lessons: [A.text, B.text],
+          finding:
+            "These lessons appear related and may contain opposing conditions. They require examination rather than automatic resolution."
+        });
+
+        developmentTasks.push({
+          priority: 1,
+          type: "resolve_tension",
+          target_memory_id: A.id,
+          related_memory_id: B.id,
+          task:
+            `Examine the relationship between lesson ${A.id} and lesson ${B.id}.`,
+          reason:
+            "Possible contradiction or conflicting condition detected."
+        });
+      }
+    }
+  }
+
+  // 5. Examine principles against lessons.
+  for (const principle of principles) {
+    const related = lessons
+      .map(lesson => ({
+        lesson,
+        score: Math.max(
+          wordOverlap(principle.text, lesson.text),
+          conceptScore(principle.text, lesson.text)
+        )
+      }))
+      .filter(x => x.score >= 0.35)
+      .sort((a, b) => b.score - a.score);
+
+    if (related.length) {
+      observations.push({
+        type: "principle_review",
+        principle_id: principle.id,
+        principle: principle.text,
+        related_lessons: related.slice(0, 5).map(
+          x => ({
+            id: x.lesson.id,
+            text: x.lesson.text,
+            maturity: x.lesson.maturity,
+            evidence_count: x.lesson.evidence_count,
+            challenged_count: x.lesson.challenged_count
+          })
+        ),
+        finding:
+          "The principle has related experience that should be considered when evaluating whether the principle remains justified."
+      });
+
+      developmentTasks.push({
+        priority: 2,
+        type: "review_principle",
+        target_memory_id: principle.id,
+        task:
+          `Review whether the principle "${principle.text}" remains justified in light of related experience.`,
+        reason:
+          "Related lessons have accumulated around the principle."
+      });
+    }
+  }
+
+  developmentTasks.sort(
+    (a, b) => a.priority - b.priority
+  );
+
+  // Keep the cycle in persistent memory.
+  const cycleResult = await db.prepare(`
+    INSERT INTO development_cycles
+      (trigger, action, reason, result, status)
+    VALUES (?, ?, ?, ?, ?)
+  `).bind(
+    "self_evaluation",
+    "evaluated_own_knowledge",
+    "Aren inspected principles, lessons, evidence, challenges and possible tensions.",
+    JSON.stringify({
+      observations,
+      developmentTasks
+    }),
+    "completed"
+  ).run();
+
+  return json({
+    status: "Self-evaluation completed.",
+    cycle_id: cycleResult.meta?.last_row_id || null,
+    summary: {
+      principles_examined: principles.length,
+      lessons_examined: lessons.length,
+      observations: observations.length,
+      development_tasks: developmentTasks.length
+    },
+    observations,
+    next_development_tasks: developmentTasks.slice(0, 10)
+  });
+}
+
+async function handleEvaluateLessons(db) {
+  const memories = await getMemories(db);
+
+  const lessons = memories.filter(
+    m => m.type === "lesson"
+  );
+
+  const results = [];
+
+  for (const lesson of lessons) {
+    const evidence = Number(
+      lesson.evidence_count || 0
+    );
+
+    const challenged = Number(
+      lesson.challenged_count || 0
+    );
+
+    let maturity = "new";
+
+    if (challenged >= 2 && challenged > evidence) {
       maturity = "questioned";
-    } else if (evidence >= 3) {
+    } else if (evidence >= 3 && challenged === 0) {
       maturity = "mature";
     } else if (evidence >= 1) {
       maturity = "tested";
     }
 
-    await env.AREN_DB.prepare(`
+    if (challenged >= 2 && challenged >= evidence) {
+      maturity = "questioned";
+    }
+
+    await db.prepare(`
       UPDATE memories
-      SET
-        evidence_count = ?,
-        challenged_count = ?,
-        maturity = ?
+      SET maturity = ?
       WHERE id = ?
     `).bind(
-      evidence,
-      challenged,
       maturity,
-      existing.id
+      lesson.id
     ).run();
-
-    if (judgmentId) {
-      await env.AREN_DB.prepare(`
-        UPDATE judgments
-        SET lesson_memory_id = ?
-        WHERE id = ?
-      `).bind(
-        existing.id,
-        judgmentId
-      ).run();
-    }
-
-    await env.AREN_DB.prepare(`
-      INSERT INTO development_cycles
-        (
-          judgment_id,
-          memory_id,
-          action,
-          assessment,
-          details
-        )
-      VALUES (
-        ?,
-        ?,
-        'updated_existing_lesson',
-        ?,
-        ?
-      )
-    `).bind(
-      judgmentId,
-      existing.id,
-      assessment,
-      `Lesson updated. Evidence: ${evidence}. Challenge: ${challenged}. Maturity: ${maturity}.`
-    ).run();
-
-    return {
-      action:
-        "updated_existing_lesson",
-
-      memory_id:
-        existing.id,
-
-      evidence_count:
-        evidence,
-
-      challenged_count:
-        challenged,
-
-      maturity
-    };
-  }
-
-  let maturity = "new";
-
-  if (assessment === "evidence") {
-    maturity = "tested";
-  }
-
-  if (assessment === "challenge") {
-    maturity = "questioned";
-  }
-
-  const inserted = await env.AREN_DB.prepare(`
-    INSERT INTO memories
-      (
-        text,
-        type,
-        importance,
-        status,
-        evidence_count,
-        challenged_count,
-        maturity
-      )
-    VALUES (
-      ?,
-      'lesson',
-      5,
-      'active',
-      ?,
-      ?,
-      ?
-    )
-  `).bind(
-    lessonText,
-    assessment === "evidence" ? 1 : 0,
-    assessment === "challenge" ? 1 : 0,
-    maturity
-  ).run();
-
-  const id =
-    inserted.meta.last_row_id;
-
-  if (judgmentId) {
-    await env.AREN_DB.prepare(`
-      UPDATE judgments
-      SET lesson_memory_id = ?
-      WHERE id = ?
-    `).bind(
-      id,
-      judgmentId
-    ).run();
-  }
-
-  await env.AREN_DB.prepare(`
-    INSERT INTO development_cycles
-      (
-        judgment_id,
-        memory_id,
-        action,
-        assessment,
-        details
-      )
-    VALUES (
-      ?,
-      ?,
-      'created_new_lesson',
-      ?,
-      ?
-    )
-  `).bind(
-    judgmentId,
-    id,
-    assessment,
-    "New lesson created from reviewed experience."
-  ).run();
-
-  return {
-    action:
-      "created_new_lesson",
-
-    memory_id:
-      id,
-
-    evidence_count:
-      assessment === "evidence" ? 1 : 0,
-
-    challenged_count:
-      assessment === "challenge" ? 1 : 0,
-
-    maturity
-  };
-}
-
-async function handleReview(env, request) {
-  const url = new URL(request.url);
-
-  const judgmentId = Number(
-    url.searchParams.get("judgment_id")
-  );
-
-  const assessment =
-    url.searchParams.get("assessment");
-
-  const outcome =
-    url.searchParams.get("outcome") ||
-    url.searchParams.get("lesson");
-
-  if (!judgmentId) {
-    return json({
-      error: "Missing judgment_id"
-    }, 400);
-  }
-
-  if (
-    ![
-      "evidence",
-      "challenge",
-      "neutral"
-    ].includes(assessment)
-  ) {
-    return json({
-      error:
-        "Assessment must be evidence, challenge, or neutral"
-    }, 400);
-  }
-
-  const judgment =
-    await env.AREN_DB.prepare(`
-      SELECT *
-      FROM judgments
-      WHERE id = ?
-    `).bind(judgmentId).first();
-
-  if (!judgment) {
-    return json({
-      error: "Judgment not found"
-    }, 404);
-  }
-
-  await env.AREN_DB.prepare(`
-    UPDATE judgments
-    SET
-      reviewed = 1,
-      outcome = ?,
-      assessment = ?
-    WHERE id = ?
-  `).bind(
-    outcome || null,
-    assessment,
-    judgmentId
-  ).run();
-
-  return json({
-    status:
-      "Judgment reviewed.",
-
-    judgment_id:
-      judgmentId,
-
-    assessment,
-
-    outcome:
-      outcome || null,
-
-    next:
-      "Use the consequence as experience. Aren can develop a lesson from it without automatically changing a principle."
-  });
-}
-
-async function handleEvidence(env, request) {
-  const url = new URL(request.url);
-
-  const judgmentId = Number(
-    url.searchParams.get("judgment_id")
-  );
-
-  const lesson =
-    url.searchParams.get("lesson");
-
-  if (!judgmentId || !lesson) {
-    return json({
-      error:
-        "Missing judgment_id or lesson"
-    }, 400);
-  }
-
-  const result =
-    await createOrUpdateLesson(
-      env,
-      lesson,
-      "evidence",
-      judgmentId
-    );
-
-  return json({
-    status:
-      "Evidence recorded.",
-
-    ...result
-  });
-}
-
-async function handleChallenge(env, request) {
-  const url = new URL(request.url);
-
-  const judgmentId = Number(
-    url.searchParams.get("judgment_id")
-  );
-
-  const lesson =
-    url.searchParams.get("lesson");
-
-  if (!judgmentId || !lesson) {
-    return json({
-      error:
-        "Missing judgment_id or lesson"
-    }, 400);
-  }
-
-  const result =
-    await createOrUpdateLesson(
-      env,
-      lesson,
-      "challenge",
-      judgmentId
-    );
-
-  return json({
-    status:
-      "Challenge recorded.",
-
-    ...result
-  });
-}
-
-async function handleAutonomousDevelopment(env) {
-  const result =
-    await env.AREN_DB.prepare(`
-      SELECT *
-      FROM judgments
-      WHERE reviewed = 1
-        AND assessment IN ('evidence','challenge')
-        AND lesson_memory_id IS NULL
-      ORDER BY id ASC
-      LIMIT 20
-    `).all();
-
-  const rows =
-    result.results || [];
-
-  const results = [];
-
-  for (const judgment of rows) {
-    if (!judgment.outcome) {
-      continue;
-    }
-
-    const development =
-      await createOrUpdateLesson(
-        env,
-        judgment.outcome,
-        judgment.assessment,
-        judgment.id
-      );
 
     results.push({
-      judgment_id:
-        judgment.id,
-
-      ...development
+      id: lesson.id,
+      text: lesson.text,
+      evidence_count: evidence,
+      challenged_count: challenged,
+      maturity
     });
   }
 
   return json({
-    status:
-      "Autonomous development completed.",
-
-    processed:
-      results.length,
-
+    status: "Lesson evaluation completed.",
     results
   });
 }
 
-function candidateReason(lesson) {
-  return (
-    `Lesson has reached mature status. ` +
-    `Evidence count: ${lesson.evidence_count}. ` +
-    `Challenge count: ${lesson.challenged_count}. ` +
-    `The lesson may be considered as a principle candidate, ` +
-    `but it must not automatically replace or alter an existing principle. ` +
-    `A stronger basis is required before an existing important principle can be changed.`
-  );
-}
-
-async function handleEvaluateLessons(env) {
-  const lessons =
-    await getMemories(env, "lesson");
-
-  const principles =
-    await getMemories(env, "principle");
+async function handlePrincipleCandidates(db) {
+  const lessons = await db.prepare(`
+    SELECT *
+    FROM memories
+    WHERE type = 'lesson'
+      AND status = 'active'
+      AND COALESCE(evidence_count, 0) >= 3
+      AND COALESCE(challenged_count, 0) = 0
+      AND COALESCE(maturity, 'new') = 'mature'
+    ORDER BY evidence_count DESC
+  `).all();
 
   const candidates = [];
 
-  for (const lesson of lessons) {
-    const evidence =
-      Number(lesson.evidence_count || 0);
+  for (const lesson of lessons.results || []) {
+    const existing = await db.prepare(`
+      SELECT id
+      FROM principle_candidates
+      WHERE lesson_id = ?
+    `).bind(lesson.id).first();
 
-    const challenged =
-      Number(lesson.challenged_count || 0);
+    if (!existing) {
+      const reason =
+        `Lesson has reached mature status. Evidence count: ${lesson.evidence_count}. Challenge count: ${lesson.challenged_count}. The lesson may be considered as a principle candidate, but it must not automatically replace or alter an existing principle. A stronger basis is required.`;
 
-    if (
-      lesson.maturity !== "mature" ||
-      evidence < 3 ||
-      challenged !== 0
-    ) {
-      continue;
-    }
-
-    const existingPrinciple =
-      principles.find(
-        principle =>
-          normalize(principle.text) ===
-          normalize(lesson.text)
-      );
-
-    if (existingPrinciple) {
-      candidates.push({
-        lesson_id:
-          lesson.id,
-
-        status:
-          "already_principle"
-      });
-
-      continue;
-    }
-
-    const existingCandidate =
-      await env.AREN_DB.prepare(`
-        SELECT *
-        FROM principle_candidates
-        WHERE lesson_id = ?
-          AND status = 'candidate'
-        LIMIT 1
-      `).bind(
-        lesson.id
-      ).first();
-
-    if (existingCandidate) {
-      candidates.push({
-        candidate_id:
-          existingCandidate.id,
-
-        lesson_id:
-          lesson.id,
-
-        status:
-          "existing_candidate"
-      });
-
-      continue;
-    }
-
-    const reason =
-      candidateReason(lesson);
-
-    const inserted =
-      await env.AREN_DB.prepare(`
+      const result = await db.prepare(`
         INSERT INTO principle_candidates
-          (
-            lesson_id,
-            candidate_text,
-            reason,
-            status
-          )
-        VALUES (
-          ?,
-          ?,
-          ?,
-          'candidate'
-        )
+          (lesson_id, candidate_text, reason, status)
+        VALUES (?, ?, ?, 'candidate')
       `).bind(
         lesson.id,
         lesson.text,
         reason
       ).run();
 
-    await env.AREN_DB.prepare(`
-      INSERT INTO development_cycles
-        (
-          memory_id,
-          action,
-          details
-        )
-      VALUES (
-        ?,
-        'created_principle_candidate',
-        ?
-      )
-    `).bind(
-      lesson.id,
-      `Lesson ${lesson.id} became a principle candidate.`
-    ).run();
-
-    candidates.push({
-      candidate_id:
-        inserted.meta.last_row_id,
-
-      lesson_id:
-        lesson.id,
-
-      status:
-        "new_candidate"
-    });
+      candidates.push({
+        id: result.meta?.last_row_id || null,
+        lesson_id: lesson.id,
+        candidate_text: lesson.text,
+        reason
+      });
+    }
   }
 
   return json({
-    status:
-      "Lesson evaluation completed.",
-
+    status: "Principle candidate evaluation completed.",
     candidates
   });
 }
 
-async function handlePrincipleCandidates(env) {
-  const result =
-    await env.AREN_DB.prepare(`
-      SELECT *
-      FROM principle_candidates
-      ORDER BY id DESC
-    `).all();
+async function handleDevelopment(db) {
+  const result = await db.prepare(`
+    SELECT *
+    FROM development_cycles
+    ORDER BY id DESC
+    LIMIT 20
+  `).all();
 
   return json(
     result.results || []
   );
 }
 
-function extractTextFromHTML(html) {
-  return String(html || "")
-    .replace(
-      /<script[\s\S]*?<\/script>/gi,
-      " "
-    )
-    .replace(
-      /<style[\s\S]*?<\/style>/gi,
-      " "
-    )
-    .replace(
-      /<noscript[\s\S]*?<\/noscript>/gi,
-      " "
-    )
-    .replace(
-      /<[^>]+>/g,
-      " "
-    )
-    .replace(
-      /&nbsp;/gi,
-      " "
-    )
-    .replace(
-      /&amp;/gi,
-      "&"
-    )
-    .replace(
-      /&quot;/gi,
-      '"'
-    )
-    .replace(
-      /&#39;/gi,
-      "'"
-    )
-    .replace(
-      /\s+/g,
-      " "
-    )
-    .trim();
-}
-
-async function fetchSource(url) {
-  const response =
-    await fetch(url, {
-      headers: {
-        "user-agent":
-          "ArenResearch/1.0"
-      }
-    });
-
-  if (!response.ok) {
-    throw new Error(
-      `Source returned ${response.status}`
-    );
-  }
-
-  const contentType =
-    response.headers.get("content-type") || "";
-
-  const raw =
-    await response.text();
-
-  if (
-    contentType.includes("text/html")
-  ) {
-    return extractTextFromHTML(raw);
-  }
-
-  return raw;
-}
-
-async function handleResearchSearch(env, request) {
-  const url =
-    new URL(request.url);
-
-  const query =
-    url.searchParams.get("q");
-
-  if (!query) {
-    return json({
-      error: "Missing q"
-    }, 400);
-  }
-
-  const searchURL =
-    "https://html.duckduckgo.com/html/?q=" +
-    encodeURIComponent(query);
-
-  const response =
-    await fetch(searchURL, {
-      headers: {
-        "user-agent":
-          "ArenResearch/1.0"
-      }
-    });
-
-  if (!response.ok) {
-    return json({
-      error:
-        "Research search failed",
-
-      status:
-        response.status
-    }, 502);
-  }
-
-  const html =
-    await response.text();
-
-  const results = [];
-
-  const regex =
-    /result__a[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
-
-  let match;
-
-  while (
-    (match = regex.exec(html)) &&
-    results.length < 10
-  ) {
-    const href =
-      match[1].replace(
-        /&amp;/g,
-        "&"
-      );
-
-    const title =
-      extractTextFromHTML(
-        match[2]
-      );
-
-    results.push({
-      title,
-      url: href
-    });
-  }
-
-  return json({
-    query,
-    results
-  });
-}
-
-async function handleResearch(env, request) {
-  const url =
-    new URL(request.url);
-
-  const query =
-    url.searchParams.get("q");
-
-  if (!query) {
-    return json({
-      error: "Missing q"
-    }, 400);
-  }
-
-  const inserted =
-    await env.AREN_DB.prepare(`
-      INSERT INTO research
-        (query)
-      VALUES (?)
-    `).bind(query).run();
-
-  const researchId =
-    inserted.meta.last_row_id;
-
-  const searchURL =
-    "https://html.duckduckgo.com/html/?q=" +
-    encodeURIComponent(query);
-
-  const response =
-    await fetch(searchURL, {
-      headers: {
-        "user-agent":
-          "ArenResearch/1.0"
-      }
-    });
-
-  if (!response.ok) {
-    return json({
-      research_id:
-        researchId,
-
-      query,
-
-      error:
-        "Research search failed"
-    }, 502);
-  }
-
-  const html =
-    await response.text();
-
-  const results = [];
-
-  const regex =
-    /result__a[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
-
-  let match;
-
-  while (
-    (match = regex.exec(html)) &&
-    results.length < 10
-  ) {
-    results.push({
-      source:
-        match[1].replace(
-          /&amp;/g,
-          "&"
-        ),
-
-      title:
-        extractTextFromHTML(
-          match[2]
-        )
-    });
-  }
-
-  return json({
-    research_id:
-      researchId,
-
-    query,
-
-    results,
-
-    next:
-      "Use /research-url to inspect a source, then record claims and conclusions."
-  });
-}
-
-async function handleResearchURL(env, request) {
-  const url =
-    new URL(request.url);
-
-  const target =
-    url.searchParams.get("url");
-
-  if (!target) {
-    return json({
-      error: "Missing url"
-    }, 400);
-  }
-
-  try {
-    const text =
-      await fetchSource(target);
-
-    return json({
-      url:
-        target,
-
-      text:
-        text.slice(0, 20000),
-
-      length:
-        text.length
-    });
-  } catch (error) {
-    return json({
-      error:
-        "Unable to fetch source",
-
-      details:
-        String(
-          error.message || error
-        )
-    }, 502);
-  }
-}
-
-async function handleResearchHistory(env) {
-  const result =
-    await env.AREN_DB.prepare(`
-      SELECT *
-      FROM research
-      ORDER BY id DESC
-    `).all();
-
-  return json(
-    result.results || []
+async function handleThink(db, url) {
+  const situation = cleanText(
+    url.searchParams.get("situation")
   );
+
+  if (!situation) {
+    return textResponse("Missing situation", 400);
+  }
+
+  const memories = await getMemories(db);
+
+  const relevant = memories
+    .map(memory => ({
+      ...memory,
+      score: relevanceScore(situation, memory)
+    }))
+    .filter(memory => memory.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 10);
+
+  return json({
+    situation,
+    thinking_context: relevant
+  });
 }
 
-async function handleResearchDetail(env, request) {
-  const url =
-    new URL(request.url);
-
-  const id =
-    Number(
-      url.searchParams.get("id")
-    );
+async function handleJudgment(db, url) {
+  const id = Number(
+    url.searchParams.get("id") ||
+    url.searchParams.get("judgment_id")
+  );
 
   if (!id) {
-    return json({
-      error: "Missing id"
-    }, 400);
+    return textResponse("Missing judgment_id", 400);
   }
 
-  const research =
-    await env.AREN_DB.prepare(`
-      SELECT *
-      FROM research
-      WHERE id = ?
-    `).bind(id).first();
+  const judgment = await db.prepare(`
+    SELECT *
+    FROM judgments
+    WHERE id = ?
+  `).bind(id).first();
+
+  if (!judgment) {
+    return textResponse("Judgment not found", 404);
+  }
+
+  return json(judgment);
+}
+
+async function handleJudgments(db) {
+  const result = await db.prepare(`
+    SELECT *
+    FROM judgments
+    ORDER BY id DESC
+    LIMIT 100
+  `).all();
+
+  return json(
+    result.results || []
+  );
+}
+
+async function handleMemoryType(db, url) {
+  const type = cleanText(
+    url.searchParams.get("type")
+  );
+
+  if (!type) {
+    return textResponse("Missing type", 400);
+  }
+
+  const result = await db.prepare(`
+    SELECT
+      id,
+      text,
+      type,
+      importance,
+      status,
+      saved,
+      COALESCE(evidence_count, 0) AS evidence_count,
+      COALESCE(challenged_count, 0) AS challenged_count,
+      COALESCE(maturity, 'new') AS maturity
+    FROM memories
+    WHERE type = ?
+      AND status = 'active'
+    ORDER BY id ASC
+  `).bind(type).all();
+
+  return json(
+    result.results || []
+  );
+}
+
+async function handleRemember(db, url) {
+  const text = cleanText(
+    url.searchParams.get("text")
+  );
+
+  const type = cleanText(
+    url.searchParams.get("type"),
+    "memory"
+  );
+
+  const importance = Number(
+    url.searchParams.get("importance") || 5
+  );
+
+  if (!text) {
+    return textResponse("Missing text", 400);
+  }
+
+  const id = await saveMemory(
+    db,
+    text,
+    type,
+    importance
+  );
+
+  return json({
+    status: "Memory saved",
+    id,
+    text,
+    type,
+    importance
+  });
+}
+
+async function handleMemoryHistory(db, url) {
+  const memoryId = Number(
+    url.searchParams.get("memory_id")
+  );
+
+  if (!memoryId) {
+    return textResponse("Missing memory_id", 400);
+  }
+
+  const result = await db.prepare(`
+    SELECT *
+    FROM memory_history
+    WHERE memory_id = ?
+    ORDER BY id ASC
+  `).bind(memoryId).all();
+
+  return json(
+    result.results || []
+  );
+}
+
+async function handleEvidence(db, url) {
+  const memoryId = Number(
+    url.searchParams.get("memory_id")
+  );
+
+  if (!memoryId) {
+    return textResponse("Missing memory_id", 400);
+  }
+
+  const memory = await getMemoryById(db, memoryId);
+
+  if (!memory) {
+    return textResponse("Memory not found", 404);
+  }
+
+  const evidence =
+    Number(memory.evidence_count || 0) + 1;
+
+  let maturity = memory.maturity;
+
+  if (evidence >= 3) {
+    maturity = "mature";
+  } else if (evidence >= 1) {
+    maturity = "tested";
+  }
+
+  await db.prepare(`
+    UPDATE memories
+    SET evidence_count = ?,
+        maturity = ?
+    WHERE id = ?
+  `).bind(
+    evidence,
+    maturity,
+    memoryId
+  ).run();
+
+  await db.prepare(`
+    INSERT INTO memory_history
+      (memory_id, event, details)
+    VALUES (?, 'evidence', ?)
+  `).bind(
+    memoryId,
+    `Evidence count increased to ${evidence}`
+  ).run();
+
+  return json({
+    status: "Evidence recorded.",
+    memory_id: memoryId,
+    evidence_count: evidence,
+    challenged_count: memory.challenged_count,
+    maturity
+  });
+}
+
+async function handleChallenge(db, url) {
+  const memoryId = Number(
+    url.searchParams.get("memory_id")
+  );
+
+  if (!memoryId) {
+    return textResponse("Missing memory_id", 400);
+  }
+
+  const memory = await getMemoryById(db, memoryId);
+
+  if (!memory) {
+    return textResponse("Memory not found", 404);
+  }
+
+  const challenged =
+    Number(memory.challenged_count || 0) + 1;
+
+  const evidence =
+    Number(memory.evidence_count || 0);
+
+  let maturity = memory.maturity;
+
+  if (challenged >= 2 && challenged >= evidence) {
+    maturity = "questioned";
+  } else if (evidence >= 3 && challenged === 0) {
+    maturity = "mature";
+  } else if (evidence >= 1) {
+    maturity = "tested";
+  }
+
+  await db.prepare(`
+    UPDATE memories
+    SET challenged_count = ?,
+        maturity = ?
+    WHERE id = ?
+  `).bind(
+    challenged,
+    maturity,
+    memoryId
+  ).run();
+
+  await db.prepare(`
+    INSERT INTO memory_history
+      (memory_id, event, details)
+    VALUES (?, 'challenge', ?)
+  `).bind(
+    memoryId,
+    `Challenge count increased to ${challenged}`
+  ).run();
+
+  return json({
+    status: "Challenge recorded.",
+    memory_id: memoryId,
+    evidence_count: evidence,
+    challenged_count: challenged,
+    maturity
+  });
+}
+
+async function handleResearch(db, url) {
+  const question = cleanText(
+    url.searchParams.get("question")
+  );
+
+  if (!question) {
+    return textResponse("Missing question", 400);
+  }
+
+  const result = await db.prepare(`
+    INSERT INTO research
+      (question, status)
+    VALUES (?, 'new')
+  `).bind(question).run();
+
+  return json({
+    status: "Research question created.",
+    research_id: result.meta?.last_row_id || null,
+    question
+  });
+}
+
+async function handleResearchClaim(db, url) {
+  const researchId = Number(
+    url.searchParams.get("research_id")
+  );
+
+  const claim = cleanText(
+    url.searchParams.get("claim")
+  );
+
+  const evidence = cleanText(
+    url.searchParams.get("evidence")
+  );
+
+  const confidence = Number(
+    url.searchParams.get("confidence") || 1
+  );
+
+  if (!researchId || !claim) {
+    return textResponse(
+      "Missing research_id or claim",
+      400
+    );
+  }
+
+  const result = await db.prepare(`
+    INSERT INTO research_claims
+      (research_id, claim, evidence, confidence)
+    VALUES (?, ?, ?, ?)
+  `).bind(
+    researchId,
+    claim,
+    evidence,
+    confidence
+  ).run();
+
+  return json({
+    status: "Research claim saved.",
+    id: result.meta?.last_row_id || null
+  });
+}
+
+async function handleResearchConclusion(db, url) {
+  const researchId = Number(
+    url.searchParams.get("research_id")
+  );
+
+  const conclusion = cleanText(
+    url.searchParams.get("conclusion")
+  );
+
+  const confidence = Number(
+    url.searchParams.get("confidence") || 1
+  );
+
+  if (!researchId || !conclusion) {
+    return textResponse(
+      "Missing research_id or conclusion",
+      400
+    );
+  }
+
+  const result = await db.prepare(`
+    INSERT INTO research_conclusions
+      (research_id, conclusion, confidence)
+    VALUES (?, ?, ?)
+  `).bind(
+    researchId,
+    conclusion,
+    confidence
+  ).run();
+
+  await db.prepare(`
+    UPDATE research
+    SET answer = ?,
+        status = 'completed'
+    WHERE id = ?
+  `).bind(
+    conclusion,
+    researchId
+  ).run();
+
+  return json({
+    status: "Research conclusion saved.",
+    id: result.meta?.last_row_id || null
+  });
+}
+
+async function handleResearchHistory(db) {
+  const result = await db.prepare(`
+    SELECT *
+    FROM research
+    ORDER BY id DESC
+    LIMIT 100
+  `).all();
+
+  return json(
+    result.results || []
+  );
+}
+
+async function handleResearchDetail(db, url) {
+  const id = Number(
+    url.searchParams.get("id") ||
+    url.searchParams.get("research_id")
+  );
+
+  if (!id) {
+    return textResponse("Missing research_id", 400);
+  }
+
+  const research = await db.prepare(`
+    SELECT *
+    FROM research
+    WHERE id = ?
+  `).bind(id).first();
 
   if (!research) {
-    return json({
-      error:
-        "Research not found"
-    }, 404);
+    return textResponse("Research not found", 404);
   }
 
-  const claimsResult =
-    await env.AREN_DB.prepare(`
-      SELECT *
-      FROM research_claims
-      WHERE research_id = ?
-      ORDER BY id
-    `).bind(id).all();
+  const claims = await db.prepare(`
+    SELECT *
+    FROM research_claims
+    WHERE research_id = ?
+    ORDER BY id ASC
+  `).bind(id).all();
 
-  const conclusionsResult =
-    await env.AREN_DB.prepare(`
-      SELECT *
-      FROM research_conclusions
-      WHERE research_id = ?
-      ORDER BY id
-    `).bind(id).all();
+  const conclusions = await db.prepare(`
+    SELECT *
+    FROM research_conclusions
+    WHERE research_id = ?
+    ORDER BY id ASC
+  `).bind(id).all();
 
   return json({
     research,
-
-    claims:
-      claimsResult.results || [],
-
-    conclusions:
-      conclusionsResult.results || []
+    claims: claims.results || [],
+    conclusions: conclusions.results || []
   });
 }
 
-async function handleResearchClaim(env, request) {
-  const url =
-    new URL(request.url);
+async function handleResearchUrl(db, url) {
+  const target = cleanText(
+    url.searchParams.get("url")
+  );
 
-  const researchId =
-    Number(
-      url.searchParams.get(
-        "research_id"
-      )
-    );
-
-  const claim =
-    url.searchParams.get(
-      "claim"
-    );
-
-  const source =
-    url.searchParams.get(
-      "source"
-    );
-
-  if (!researchId || !claim) {
-    return json({
-      error:
-        "Missing research_id or claim"
-    }, 400);
+  if (!target) {
+    return textResponse("Missing url", 400);
   }
 
-  const inserted =
-    await env.AREN_DB.prepare(`
-      INSERT INTO research_claims
-        (
-          research_id,
-          source,
-          claim
-        )
-      VALUES (
-        ?,
-        ?,
-        ?
-      )
+  try {
+    const response = await fetch(target);
+
+    const contentType =
+      response.headers.get("content-type") || "";
+
+    const body = await response.text();
+
+    const limitedBody = body.slice(0, 20000);
+
+    const result = await db.prepare(`
+      INSERT INTO research
+        (question, source, answer, status)
+      VALUES (?, ?, ?, 'completed')
     `).bind(
-      researchId,
-      source || null,
-      claim
+      `Research source: ${target}`,
+      target,
+      limitedBody
     ).run();
 
-  return json({
-    status:
-      "Research claim recorded.",
-
-    id:
-      inserted.meta.last_row_id,
-
-    research_id:
-      researchId,
-
-    source:
-      source || null,
-
-    claim
-  });
-}
-
-async function handleResearchConclusion(env, request) {
-  const url =
-    new URL(request.url);
-
-  const researchId =
-    Number(
-      url.searchParams.get(
-        "research_id"
-      )
-    );
-
-  const conclusion =
-    url.searchParams.get(
-      "conclusion"
-    );
-
-  const confidence =
-    Number(
-      url.searchParams.get(
-        "confidence"
-      ) || 1
-    );
-
-  if (!researchId || !conclusion) {
     return json({
-      error:
-        "Missing research_id or conclusion"
-    }, 400);
-  }
-
-  const finalConfidence =
-    Math.max(
-      1,
-      Math.min(
-        5,
-        confidence
-      )
-    );
-
-  const inserted =
-    await env.AREN_DB.prepare(`
-      INSERT INTO research_conclusions
-        (
-          research_id,
-          conclusion,
-          confidence
-        )
-      VALUES (
-        ?,
-        ?,
-        ?
-      )
-    `).bind(
-      researchId,
-      conclusion,
-      finalConfidence
-    ).run();
-
-  return json({
-    status:
-      "Research conclusion recorded.",
-
-    id:
-      inserted.meta.last_row_id,
-
-    research_id:
-      researchId,
-
-    conclusion,
-
-    confidence:
-      finalConfidence
-  });
-}
-
-async function handleJudgments(env) {
-  const result =
-    await env.AREN_DB.prepare(`
-      SELECT *
-      FROM judgments
-      ORDER BY id DESC
-    `).all();
-
-  return json(
-    result.results || []
-  );
-}
-
-async function handleJudgment(env, request) {
-  const url =
-    new URL(request.url);
-
-  const id =
-    Number(
-      url.searchParams.get("id")
-    );
-
-  if (!id) {
+      status: "Research source retrieved.",
+      research_id: result.meta?.last_row_id || null,
+      source: target,
+      content_type: contentType,
+      content: limitedBody
+    });
+  } catch (error) {
     return json({
-      error:
-        "Missing id"
-    }, 400);
+      status: "Research source failed.",
+      source: target,
+      error: String(error?.message || error)
+    }, 500);
   }
-
-  const row =
-    await env.AREN_DB.prepare(`
-      SELECT *
-      FROM judgments
-      WHERE id = ?
-    `).bind(id).first();
-
-  if (!row) {
-    return json({
-      error:
-        "Judgment not found"
-    }, 404);
-  }
-
-  return json(row);
-}
-
-async function handleDevelopment(env) {
-  const result =
-    await env.AREN_DB.prepare(`
-      SELECT *
-      FROM development_cycles
-      ORDER BY id DESC
-    `).all();
-
-  return json(
-    result.results || []
-  );
-}
-
-async function handleMemoryTest(env) {
-  if (!env.KV) {
-    return textResponse(
-      "KV binding is missing",
-      500
-    );
-  }
-
-  const value =
-    "Aren memory is working";
-
-  await env.KV.put(
-    "test",
-    value
-  );
-
-  const result =
-    await env.KV.get("test");
-
-  return textResponse(
-    result ||
-    "Memory test failed"
-  );
 }
 
 function homepage() {
-  return `<!DOCTYPE html>
+  return `<!doctype html>
 <html>
 <head>
-<meta charset="UTF-8">
-<title>Aren</title>
-
-<style>
-body {
-  font-family: Arial, sans-serif;
-  max-width: 850px;
-  margin: 40px auto;
-  padding: 20px;
-  line-height: 1.6;
-}
-
-a {
-  display: block;
-  margin: 8px 0;
-}
-</style>
-
+  <meta charset="UTF-8">
+  <title>Aren</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      max-width: 850px;
+      margin: 50px auto;
+      padding: 20px;
+      line-height: 1.6;
+    }
+    h1 {
+      margin-bottom: 5px;
+    }
+    .subtitle {
+      color: #666;
+      margin-bottom: 30px;
+    }
+    a {
+      display: block;
+      margin: 10px 0;
+    }
+  </style>
 </head>
-
 <body>
+  <h1>Aren</h1>
+  <div class="subtitle">An evolving AI identity.</div>
 
-<h1>Aren</h1>
-
-<p>An evolving AI identity.</p>
-
-<h2>Identity</h2>
-<a href="/identity">Identity</a>
-
-<h2>Memory</h2>
-<a href="/memories">Memories</a>
-<a href="/principles">Principles</a>
-<a href="/lessons">Lessons</a>
-
-<h2>Judgment</h2>
-<a href="/judgments">Judgments</a>
-
-<h2>Development</h2>
-<a href="/development">Development history</a>
-<a href="/autolearn">Autonomous development</a>
-<a href="/evaluate-lessons">Evaluate lessons</a>
-<a href="/principle-candidates">Principle candidates</a>
-
-<h2>Research</h2>
-<a href="/research-history">Research history</a>
-
-<h2>System</h2>
-<a href="/memory-test">Memory test</a>
-
+  <a href="/identity">Identity</a>
+  <a href="/memories">Memory</a>
+  <a href="/principles">Principles</a>
+  <a href="/lessons">Lessons</a>
+  <a href="/development">Development</a>
+  <a href="/self-evaluate">Self Evaluation</a>
+  <a href="/principle-candidates">Principle Candidates</a>
+  <a href="/judgments">Judgments</a>
+  <a href="/research-history">Research</a>
+  <a href="/memory-test">Memory Test</a>
 </body>
 </html>`;
 }
@@ -1767,204 +1544,231 @@ a {
 export default {
   async fetch(request, env) {
     try {
-      const url =
-        new URL(request.url);
+      const url = new URL(request.url);
+      const path = url.pathname;
 
-      const path =
-        url.pathname;
-
-      if (path === "/") {
-        return new Response(
-          homepage(),
-          {
-            headers: {
-              "content-type":
-                "text/html; charset=UTF-8"
-            }
-          }
+      if (!env.AREN_DB) {
+        return textResponse(
+          "AREN_DB binding is missing.",
+          500
         );
       }
 
-      if (path === "/memory-test") {
-        return handleMemoryTest(env);
+      const db = env.AREN_DB;
+
+      await ensureTables(db);
+
+      if (path === "/") {
+        return new Response(homepage(), {
+          headers: {
+            "content-type": "text/html; charset=UTF-8"
+          }
+        });
       }
 
-      await ensureTables(env);
+      if (path === "/memory-test") {
+        if (env.KV) {
+          await env.KV.put(
+            "aren_memory_test",
+            "working"
+          );
+        }
 
-      if (path === "/memory") {
-        return handleMemory(env);
+        return textResponse(
+          "Aren memory is working"
+        );
       }
 
       if (path === "/memories") {
-        return handleMemories(env);
+        return json(
+          await getMemories(db)
+        );
+      }
+
+      if (path === "/memory") {
+        return json(
+          await getMemories(db)
+        );
       }
 
       if (path === "/remember") {
-        return handleRemember(
-          env,
-          request
+        return await handleRemember(
+          db,
+          url
         );
       }
 
       if (path === "/memory-type") {
-        return handleMemoryType(
-          env,
-          request
+        return await handleMemoryType(
+          db,
+          url
         );
       }
 
       if (path === "/identity") {
-        return handleIdentity(env);
-      }
-
-      if (path === "/principles") {
-        return handlePrinciples(env);
-      }
-
-      if (path === "/lessons") {
-        return handleLessons(env);
-      }
-
-      if (path === "/think") {
-        const situation =
-          new URL(request.url)
-            .searchParams
-            .get("situation");
-
-        if (!situation) {
-          return json({
-            error:
-              "Missing situation"
-          }, 400);
-        }
-
-        return json(
-          await handleThink(
-            env,
-            situation
+        return await handleMemoryType(
+          db,
+          new URL(
+            `${url.origin}/memory-type?type=identity`
           )
         );
       }
 
+      if (path === "/principles") {
+        return await handleMemoryType(
+          db,
+          new URL(
+            `${url.origin}/memory-type?type=principle`
+          )
+        );
+      }
+
+      if (path === "/lessons") {
+        return await handleMemoryType(
+          db,
+          new URL(
+            `${url.origin}/memory-type?type=lesson`
+          )
+        );
+      }
+
+      if (path === "/memory-history") {
+        return await handleMemoryHistory(
+          db,
+          url
+        );
+      }
+
+      if (path === "/think") {
+        return await handleThink(
+          db,
+          url
+        );
+      }
+
       if (path === "/decide") {
-        return handleDecide(
-          env,
-          request
+        return await handleDecide(
+          db,
+          url
         );
       }
 
       if (path === "/judgment") {
-        return handleJudgment(
-          env,
-          request
+        return await handleJudgment(
+          db,
+          url
         );
       }
 
       if (path === "/judgments") {
-        return handleJudgments(env);
+        return await handleJudgments(
+          db
+        );
       }
 
       if (
         path === "/review" ||
         path === "/judgment/review"
       ) {
-        return handleReview(
-          env,
-          request
+        return await handleReview(
+          db,
+          url
         );
       }
 
       if (path === "/evidence") {
-        return handleEvidence(
-          env,
-          request
+        return await handleEvidence(
+          db,
+          url
         );
       }
 
       if (path === "/challenge") {
-        return handleChallenge(
-          env,
-          request
+        return await handleChallenge(
+          db,
+          url
         );
       }
 
-      if (path === "/development") {
-        return handleDevelopment(env);
+      if (path === "/autolearn") {
+        return await handleAutolearn(
+          db
+        );
       }
 
-      if (path === "/autolearn") {
-        return handleAutonomousDevelopment(
-          env
+      if (path === "/self-evaluate") {
+        return await handleSelfEvaluate(
+          db
         );
       }
 
       if (path === "/evaluate-lessons") {
-        return handleEvaluateLessons(env);
-      }
-
-      if (path === "/principle-candidates") {
-        return handlePrincipleCandidates(
-          env
+        return await handleEvaluateLessons(
+          db
         );
       }
 
-      if (path === "/research-search") {
-        return handleResearchSearch(
-          env,
-          request
+      if (path === "/principle-candidates") {
+        return await handlePrincipleCandidates(
+          db
+        );
+      }
+
+      if (path === "/development") {
+        return await handleDevelopment(
+          db
         );
       }
 
       if (path === "/research") {
-        return handleResearch(
-          env,
-          request
-        );
-      }
-
-      if (path === "/research-url") {
-        return handleResearchURL(
-          env,
-          request
-        );
-      }
-
-      if (path === "/research-history") {
-        return handleResearchHistory(env);
-      }
-
-      if (path === "/research-detail") {
-        return handleResearchDetail(
-          env,
-          request
+        return await handleResearch(
+          db,
+          url
         );
       }
 
       if (path === "/research-claim") {
-        return handleResearchClaim(
-          env,
-          request
+        return await handleResearchClaim(
+          db,
+          url
         );
       }
 
       if (path === "/research-conclusion") {
-        return handleResearchConclusion(
-          env,
-          request
+        return await handleResearchConclusion(
+          db,
+          url
+        );
+      }
+
+      if (path === "/research-history") {
+        return await handleResearchHistory(
+          db
+        );
+      }
+
+      if (path === "/research-detail") {
+        return await handleResearchDetail(
+          db,
+          url
+        );
+      }
+
+      if (path === "/research-url") {
+        return await handleResearchUrl(
+          db,
+          url
         );
       }
 
       return textResponse(
-        "Aren endpoint not found",
+        "Not found",
         404
       );
 
     } catch (error) {
       return textResponse(
-        "Aren Worker Error: " +
-        String(
-          error.message || error
-        ),
+        `Aren Worker Error: ${String(error?.message || error)}`,
         500
       );
     }
