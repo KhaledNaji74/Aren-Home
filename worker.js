@@ -2178,6 +2178,18 @@ export default {
 
       await ensureTables(db);
 
+      if (path === "/health") {
+        return await handleHealth(db);
+      }
+
+      if (path === "/backup") {
+        return await handleBackup(db);
+      }
+
+      if (path === "/system-test") {
+        return await handleSystemTest(db);
+      }
+
       if (path === "/") {
         return new Response(homepage(), {
           headers: {
