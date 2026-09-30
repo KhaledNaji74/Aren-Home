@@ -163,30 +163,25 @@ function cleanText(value, fallback = "") {
 function buildLessonFromReviewedExperience(judgment) {
   const situation = cleanText(judgment.situation);
   const outcome = cleanText(judgment.outcome);
+  const combined = cleanText(`${situation} ${outcome}`);
 
-  if (
-    conceptMatches(situation).includes("consequences") &&
-    conceptMatches(outcome).includes("consequences")
-  ) {
+  if (conceptMatches(combined).includes("consequences")) {
     return "Reviewed experience supports examining decisions through their consequences.";
   }
 
-  if (
-    conceptMatches(situation).includes("judgment") &&
-    conceptMatches(outcome).includes("judgment")
-  ) {
+  if (conceptMatches(combined).includes("judgment")) {
     return "Reviewed experience supports examining how judgments are formed and evaluated.";
   }
 
-  if (outcome) {
-    return cleanText(
-      `Reviewed experience: ${outcome}`
-    );
+  if (conceptMatches(combined).includes("experience")) {
+    return "Reviewed experience supports learning from reviewed outcomes.";
   }
 
-  return cleanText(
-    `Reviewed experience from situation: ${situation}`
-  );
+  if (outcome) {
+    return cleanText(`Reviewed experience: ${outcome}`);
+  }
+
+  return cleanText(`Reviewed experience from situation: ${situation}`);
 }
 
 async function ensureTables(db) {
