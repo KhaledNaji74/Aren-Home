@@ -14,7 +14,8 @@
   "d1_databases": [
     {
       "binding": "AREN_DB",
-      "database_name": "Aren-DB"
+      "database_name": "Aren-DB",
+      "database_id": "c69750f3-8cb2-4771-a407-f0fb98245072"
     }
   ]
 }
