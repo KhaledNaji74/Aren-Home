@@ -160,6 +160,35 @@ function cleanText(value, fallback = "") {
   return String(value || fallback).trim().replace(/\s+/g, " ");
 }
 
+function buildLessonFromReviewedExperience(judgment) {
+  const situation = cleanText(judgment.situation);
+  const outcome = cleanText(judgment.outcome);
+
+  if (
+    conceptMatches(situation).includes("consequences") &&
+    conceptMatches(outcome).includes("consequences")
+  ) {
+    return "Reviewed experience supports examining decisions through their consequences.";
+  }
+
+  if (
+    conceptMatches(situation).includes("judgment") &&
+    conceptMatches(outcome).includes("judgment")
+  ) {
+    return "Reviewed experience supports examining how judgments are formed and evaluated.";
+  }
+
+  if (outcome) {
+    return cleanText(
+      `Reviewed experience: ${outcome}`
+    );
+  }
+
+  return cleanText(
+    `Reviewed experience from situation: ${situation}`
+  );
+}
+
 async function ensureTables(db) {
   await db.prepare(`
     CREATE TABLE IF NOT EXISTS memories (
@@ -654,11 +683,7 @@ async function handleAutolearn(db) {
   const results = [];
 
   for (const judgment of rows.results || []) {
-    const text = cleanText(
-      judgment.outcome ||
-      judgment.judgment ||
-      judgment.situation
-    );
+    const text = buildLessonFromReviewedExperience(judgment);
 
     const lessonId = await saveMemory(
       db,
