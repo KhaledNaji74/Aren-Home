@@ -2109,6 +2109,19 @@ export default {
         );
       }
 
+      if (path === "/context") {
+        const memories = await getMemories(db);
+
+        return json({
+          identity: memories.filter(m => m.type === "identity"),
+          principles: memories.filter(m => m.type === "principle"),
+          lessons: memories.filter(m => m.type === "lesson"),
+          memories: memories.filter(
+            m => !["identity", "principle", "lesson"].includes(m.type)
+          )
+        });
+      }
+
       if (path === "/remember") {
         return await handleRemember(
           db,
