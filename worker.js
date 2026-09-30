@@ -2013,6 +2013,108 @@ async function handleResearchUrl(db, url) {
   }
 }
 
+
+async function handleHealth(db) {
+  const requiredTables = [
+    "memories",
+    "judgments",
+    "memory_history",
+    "development_cycles",
+    "development_tasks",
+    "development_test_links",
+    "principle_candidates",
+    "research",
+    "research_claims",
+    "research_conclusions",
+    "schema_migrations"
+  ];
+
+  const checks = [];
+  for (const table of requiredTables) {
+    try {
+      await db.prepare(`SELECT 1 FROM ${table} LIMIT 1`).first();
+      checks.push({ table, ok: true });
+    } catch (error) {
+      checks.push({ table, ok: false, error: String(error?.message || error) });
+    }
+  }
+
+  const failed = checks.filter(c => !c.ok);
+
+  return json({
+    status: failed.length ? "unhealthy" : "healthy",
+    database: "AREN_DB",
+    tables: checks,
+    checked_at: new Date().toISOString()
+  }, failed.length ? 500 : 200);
+}
+
+async function handleBackup(db) {
+  const memories = await db.prepare(`
+    SELECT * FROM memories ORDER BY id ASC
+  `).all();
+
+  const judgments = await db.prepare(`
+    SELECT * FROM judgments ORDER BY id ASC
+  `).all();
+
+  const memoryHistory = await db.prepare(`
+    SELECT * FROM memory_history ORDER BY id ASC
+  `).all();
+
+  return json({
+    backup_version: 1,
+    created_at: new Date().toISOString(),
+    source: "Aren-DB",
+    memories: memories.results || [],
+    judgments: judgments.results || [],
+    memory_history: memoryHistory.results || []
+  });
+}
+
+async function handleSystemTest(db) {
+  const memories = await getMemories(db);
+  const hasIdentity = memories.some(m => m.type === "identity");
+  const hasPrinciple = memories.some(m => m.type === "principle");
+  const hasLesson = memories.some(m => m.type === "lesson");
+
+  let judgmentTest = null;
+  try {
+    const result = buildJudgment(
+      "A decision should be examined through its consequences over time",
+      memories.filter(m => m.type === "principle"),
+      memories.filter(m => m.type === "lesson")
+    );
+    judgmentTest = {
+      ok: true,
+      judgment: result.judgment
+    };
+  } catch (error) {
+    judgmentTest = {
+      ok: false,
+      error: String(error?.message || error)
+    };
+  }
+
+  const checks = {
+    d1: true,
+    identity: hasIdentity,
+    principle: hasPrinciple,
+    lessons: hasLesson,
+    judgment_engine: judgmentTest.ok
+  };
+
+  const passed = Object.values(checks).filter(Boolean).length;
+
+  return json({
+    status: passed === Object.keys(checks).length ? "healthy" : "attention_required",
+    checks,
+    passed,
+    total: Object.keys(checks).length,
+    judgment_test: judgmentTest
+  }, passed === Object.keys(checks).length ? 200 : 500);
+}
+
 function homepage() {
   return `<!doctype html>
 <html>
