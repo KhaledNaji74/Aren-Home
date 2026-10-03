@@ -1405,6 +1405,13 @@ async function analyzeLessonEvidence(db, lessonId) {
     ORDER BY j.id ASC
   `).bind(lessonId).all();
 
+  const standaloneChallenges = await db.prepare(`
+    SELECT id, situation, outcome, strength
+    FROM lesson_challenges
+    WHERE lesson_id = ?
+    ORDER BY id ASC
+  `).bind(lessonId).all();
+
   let support = 0;
   let challenge = 0;
 
@@ -1432,12 +1439,20 @@ async function analyzeLessonEvidence(db, lessonId) {
     ).run();
   }
 
+  for (const row of standaloneChallenges.results || []) {
+    challenge += Number(row.strength || 0);
+  }
+
   support = Number(support.toFixed(6));
   challenge = Number(challenge.toFixed(6));
 
+  const analyzedExperiences =
+    (rows.results?.length || 0) +
+    (standaloneChallenges.results?.length || 0);
+
   let conclusion;
 
-  if (!rows.results?.length) {
+  if (!analyzedExperiences) {
     conclusion = "No analyzed evidence or challenges are available yet.";
   } else if (support > challenge * 1.15) {
     conclusion =
