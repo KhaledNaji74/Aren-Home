@@ -1323,6 +1323,51 @@ function analyzeReviewOutcome(lesson, judgment) {
   };
 }
 
+async function backfillLessonEvaluations(db) {
+  const rows = await db.prepare(`
+    SELECT
+      l.lesson_id,
+      j.id AS judgment_id,
+      j.situation,
+      j.judgment,
+      j.assessment,
+      j.outcome
+    FROM development_test_links l
+    INNER JOIN judgments j
+      ON j.id = l.judgment_id
+    WHERE j.assessment IN ('evidence', 'challenge')
+  `).all();
+
+  let created = 0;
+
+  for (const row of rows.results || []) {
+    const lesson = await getMemoryById(db, row.lesson_id);
+    if (!lesson) continue;
+
+    const analysis = analyzeReviewOutcome(lesson, row);
+
+    const result = await db.prepare(`
+      INSERT OR IGNORE INTO lesson_evaluations
+        (lesson_id, judgment_id, assessment, outcome, relevance, strength, conclusion)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).bind(
+      row.lesson_id,
+      row.judgment_id,
+      row.assessment,
+      row.outcome || "",
+      analysis.relevance,
+      analysis.strength,
+      analysis.conclusion
+    ).run();
+
+    if (result.meta?.changes) {
+      created += Number(result.meta.changes);
+    }
+  }
+
+  return created;
+}
+
 async function analyzeLessonEvidence(db, lessonId) {
   const lesson = await getMemoryById(db, lessonId);
 
@@ -1672,6 +1717,7 @@ async function executeDevelopmentTask(db, task) {
     case "gather_evidence":
       return executeTestLesson(db, task);
     case "analyze_evidence":
+      await backfillLessonEvaluations(db);
       return analyzeLessonEvidence(db, task.target_memory_id);
     case "resolve_tension":
       return executeResolveTension(db, task);
@@ -2588,6 +2634,8 @@ export default {
       }
 
       if (path === "/lesson-analysis") {
+        await backfillLessonEvaluations(db);
+
         const memoryId = Number(
           url.searchParams.get("memory_id")
         );
