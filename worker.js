@@ -2648,24 +2648,51 @@ export default {
       }
 
       if (path === "/lesson-analysis") {
-        const memoryId = Number(
-          url.searchParams.get("memory_id")
-        );
+        const memoryId = Number(url.searchParams.get("memory_id"));
 
         if (!memoryId) {
           return textResponse("Missing memory_id", 400);
         }
 
-        try {
-          return await analyzeLessonEvidence(db, memoryId);
-        } catch (error) {
+        const lesson = await db.prepare(
+          "SELECT id, text, type, evidence_count, challenged_count, maturity FROM memories WHERE id = ?"
+        ).bind(memoryId).first();
+
+        if (!lesson || lesson.type !== "lesson") {
           return json({
-            status: "error",
-            route: "/lesson-analysis",
-            memory_id: memoryId,
-            error: String(error?.message || error)
-          }, 500);
+            status: "skipped",
+            reason: "Lesson not found."
+          });
         }
+
+        const rows = await db.prepare(
+          `SELECT j.id, j.assessment, j.situation, j.judgment, j.outcome
+           FROM development_test_links l
+           INNER JOIN judgments j ON j.id = l.judgment_id
+           WHERE l.lesson_id = ?
+             AND j.assessment IN ('evidence', 'challenge')
+           ORDER BY j.id ASC`
+        ).bind(memoryId).all();
+
+        let support = 0;
+        let challenge = 0;
+
+        for (const row of (rows.results || [])) {
+          const analysis = analyzeReviewOutcome(lesson, row);
+          if (row.assessment === "evidence") support += analysis.strength;
+          if (row.assessment === "challenge") challenge += analysis.strength;
+        }
+
+        return json({
+          status: "completed",
+          lesson_id: memoryId,
+          analyzed_experiences: rows.results?.length || 0,
+          support_weight: Number(support.toFixed(6)),
+          challenge_weight: Number(challenge.toFixed(6)),
+          evidence_count: lesson.evidence_count,
+          challenged_count: lesson.challenged_count,
+          maturity: lesson.maturity
+        });
       }
 
       if (path === "/principle-candidates") {
