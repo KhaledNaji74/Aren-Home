@@ -269,6 +269,21 @@ async function ensureTables(db) {
   `).run();
 
   await db.prepare(`
+    CREATE TABLE IF NOT EXISTS lesson_evaluations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      lesson_id INTEGER NOT NULL,
+      judgment_id INTEGER NOT NULL,
+      assessment TEXT NOT NULL,
+      outcome TEXT,
+      relevance REAL DEFAULT 0,
+      strength REAL DEFAULT 0,
+      conclusion TEXT,
+      created DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(lesson_id, judgment_id)
+    )
+  `).run();
+
+  await db.prepare(`
     CREATE TABLE IF NOT EXISTS development_tasks (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       cycle_id INTEGER,
@@ -375,6 +390,12 @@ async function ensureTables(db) {
   try {
     await db.prepare(
       `ALTER TABLE judgments ADD COLUMN lesson_memory_id INTEGER`
+    ).run();
+  } catch (_) {}
+
+  try {
+    await db.prepare(
+      `ALTER TABLE judgments ADD COLUMN outcome TEXT`
     ).run();
   } catch (_) {}
 }
@@ -627,10 +648,12 @@ async function handleReview(db, url) {
 
   await db.prepare(`
     UPDATE judgments
-    SET assessment = ?
+    SET assessment = ?,
+        outcome = ?
     WHERE id = ?
   `).bind(
     assessment,
+    outcome,
     judgmentId
   ).run();
 
@@ -790,6 +813,21 @@ async function filterRepeatedDevelopmentTasks(db, tasks) {
       continue;
     }
 
+    if (type === "analyze_evidence") {
+      const changed = await db.prepare(`
+        SELECT COUNT(*) AS count
+        FROM memory_history
+        WHERE memory_id = ?
+          AND created > COALESCE(?, '1970-01-01')
+      `).bind(target, previous.completed).first();
+
+      if (Number(changed?.count || 0) > 0) {
+        filtered.push(task);
+      }
+
+      continue;
+    }
+
     if (type === "evaluate_principle_candidate") {
       const candidate = await db.prepare(`
         SELECT id
@@ -890,6 +928,34 @@ async function handleSelfEvaluate(db) {
           `Test the lesson "${lesson.text}" against new experience.`,
         reason:
           "The lesson has unresolved challenges."
+      });
+    }
+  }
+
+  // 1b. Analyze lessons where support and challenge both exist.
+  for (const lesson of lessons) {
+    const evidence = Number(lesson.evidence_count || 0);
+    const challenged = Number(lesson.challenged_count || 0);
+
+    if (evidence > 0 && challenged > 0) {
+      observations.push({
+        type: "mixed_evidence",
+        memory_id: lesson.id,
+        text: lesson.text,
+        evidence_count: evidence,
+        challenged_count: challenged,
+        finding:
+          "This lesson contains both support and challenge. Aren should compare the reviewed outcomes instead of relying only on counts."
+      });
+
+      developmentTasks.push({
+        priority: 1,
+        type: "analyze_evidence",
+        target_memory_id: lesson.id,
+        task:
+          `Compare supporting and challenging experience for lesson ${lesson.id}.`,
+        reason:
+          "The lesson contains mixed evidence and requires comparison."
       });
     }
   }
@@ -1206,6 +1272,136 @@ async function handlePrincipleCandidates(db) {
 }
 
 
+function analyzeReviewOutcome(lesson, judgment) {
+  const source = [
+    judgment.situation,
+    judgment.judgment,
+    judgment.outcome
+  ].filter(Boolean).join(" ");
+
+  const relevance = relevanceScore(source, lesson);
+
+  const outcomeConcepts = conceptMatches(
+    String(judgment.outcome || "")
+  );
+
+  const lessonConcepts = new Set(
+    conceptMatches(lesson.text)
+  );
+
+  let conceptMatchesCount = 0;
+  for (const concept of outcomeConcepts) {
+    if (lessonConcepts.has(concept)) {
+      conceptMatchesCount++;
+    }
+  }
+
+  const conceptRelevance =
+    lessonConcepts.size && outcomeConcepts.length
+      ? conceptMatchesCount /
+        Math.max(lessonConcepts.size, outcomeConcepts.length)
+      : 0;
+
+  const strength = Number(
+    Math.min(
+      1,
+      relevance * 0.7 + conceptRelevance * 0.3
+    ).toFixed(6)
+  );
+
+  const conclusion =
+    judgment.assessment === "evidence"
+      ? "The reviewed outcome provides support for the lesson in this situation."
+      : judgment.assessment === "challenge"
+        ? "The reviewed outcome provides a challenge to the lesson in this situation."
+        : "The reviewed outcome does not materially support or challenge the lesson.";
+
+  return {
+    relevance: Number(relevance.toFixed(6)),
+    strength,
+    conclusion
+  };
+}
+
+async function analyzeLessonEvidence(db, lessonId) {
+  const lesson = await getMemoryById(db, lessonId);
+
+  if (!lesson || lesson.type !== "lesson") {
+    return {
+      status: "skipped",
+      reason: "Lesson not found."
+    };
+  }
+
+  const rows = await db.prepare(`
+    SELECT
+      j.id,
+      j.situation,
+      j.judgment,
+      j.assessment,
+      j.outcome
+    FROM judgments j
+    INNER JOIN lesson_evaluations e
+      ON e.lesson_id = ?
+      AND e.judgment_id = j.id
+    WHERE j.assessment IN ('evidence', 'challenge')
+    ORDER BY j.id ASC
+  `).bind(lessonId).all();
+
+  let support = 0;
+  let challenge = 0;
+
+  for (const row of rows.results || []) {
+    const analysis = analyzeReviewOutcome(lesson, row);
+
+    if (row.assessment === "evidence") {
+      support += analysis.strength;
+    } else if (row.assessment === "challenge") {
+      challenge += analysis.strength;
+    }
+  }
+
+  support = Number(support.toFixed(6));
+  challenge = Number(challenge.toFixed(6));
+
+  let conclusion;
+
+  if (!rows.results?.length) {
+    conclusion = "No analyzed evidence or challenges are available yet.";
+  } else if (support > challenge * 1.15) {
+    conclusion =
+      "Support currently outweighs challenge. The lesson remains supported, but future challenges should still be examined.";
+  } else if (challenge > support * 1.15) {
+    conclusion =
+      "Challenge currently outweighs support. The lesson should be treated as questioned until further experience clarifies it.";
+  } else {
+    conclusion =
+      "Support and challenge are materially mixed. The lesson should be refined by examining the conditions in which each outcome occurred.";
+  }
+
+  await db.prepare(`
+    INSERT INTO memory_history
+      (memory_id, event, details, created)
+    VALUES (?, 'lesson_analysis', ?, CURRENT_TIMESTAMP)
+  `).bind(
+    lessonId,
+    JSON.stringify({
+      support_weight: support,
+      challenge_weight: challenge,
+      conclusion
+    })
+  ).run();
+
+  return {
+    status: "completed",
+    lesson_id: lessonId,
+    analyzed_experiences: rows.results?.length || 0,
+    support_weight: support,
+    challenge_weight: challenge,
+    conclusion
+  };
+}
+
 async function executeTestLesson(db, task) {
   const lesson = await getMemoryById(db, task.target_memory_id);
   if (!lesson || lesson.type !== "lesson") {
@@ -1213,7 +1409,7 @@ async function executeTestLesson(db, task) {
   }
 
   const rows = await db.prepare(`
-    SELECT j.id, j.situation, j.judgment, j.assessment
+    SELECT j.id, j.situation, j.judgment, j.assessment, j.outcome
     FROM judgments j
     LEFT JOIN development_test_links l
       ON l.lesson_id = ?
@@ -1251,6 +1447,22 @@ async function executeTestLesson(db, task) {
       `).bind(
         lesson.id,
         judgment.id
+      ).run();
+
+      const analysis = analyzeReviewOutcome(lesson, judgment);
+
+      await db.prepare(`
+        INSERT OR REPLACE INTO lesson_evaluations
+          (lesson_id, judgment_id, assessment, outcome, relevance, strength, conclusion)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `).bind(
+        lesson.id,
+        judgment.id,
+        judgment.assessment,
+        judgment.outcome || "",
+        analysis.relevance,
+        analysis.strength,
+        analysis.conclusion
       ).run();
     }
   }
@@ -1459,6 +1671,8 @@ async function executeDevelopmentTask(db, task) {
     case "test_lesson":
     case "gather_evidence":
       return executeTestLesson(db, task);
+    case "analyze_evidence":
+      return analyzeLessonEvidence(db, task.target_memory_id);
     case "resolve_tension":
       return executeResolveTension(db, task);
     case "evaluate_principle_candidate":
@@ -2371,6 +2585,18 @@ export default {
         return await handleEvaluateLessons(
           db
         );
+      }
+
+      if (path === "/lesson-analysis") {
+        const memoryId = Number(
+          url.searchParams.get("memory_id")
+        );
+
+        if (!memoryId) {
+          return textResponse("Missing memory_id", 400);
+        }
+
+        return await analyzeLessonEvidence(db, memoryId);
       }
 
       if (path === "/principle-candidates") {
