@@ -2656,7 +2656,16 @@ export default {
           return textResponse("Missing memory_id", 400);
         }
 
-        return await analyzeLessonEvidence(db, memoryId);
+        try {
+          return await analyzeLessonEvidence(db, memoryId);
+        } catch (error) {
+          return json({
+            status: "error",
+            route: "/lesson-analysis",
+            memory_id: memoryId,
+            error: String(error?.message || error)
+          }, 500);
+        }
       }
 
       if (path === "/principle-candidates") {
