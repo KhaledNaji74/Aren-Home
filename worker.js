@@ -269,6 +269,18 @@ async function ensureTables(db) {
   `).run();
 
   await db.prepare(`
+    CREATE TABLE IF NOT EXISTS lesson_challenges (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      lesson_id INTEGER NOT NULL,
+      situation TEXT,
+      outcome TEXT NOT NULL,
+      relevance REAL DEFAULT 0,
+      strength REAL DEFAULT 0,
+      created DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `).run();
+
+  await db.prepare(`
     CREATE TABLE IF NOT EXISTS lesson_evaluations (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       lesson_id INTEGER NOT NULL,
@@ -1454,7 +1466,7 @@ async function analyzeLessonEvidence(db, lessonId) {
   return {
     status: "completed",
     lesson_id: lessonId,
-    analyzed_experiences: rows.results?.length || 0,
+    analyzed_experiences: (rows.results?.length || 0) + (standaloneChallenges.results?.length || 0),
     support_weight: support,
     challenge_weight: challenge,
     conclusion
@@ -2040,19 +2052,47 @@ async function handleEvidence(db, url) {
 }
 
 async function handleChallenge(db, url) {
-  const memoryId = Number(
-    url.searchParams.get("memory_id")
-  );
+  const memoryId = Number(url.searchParams.get("memory_id"));
+  const situation = cleanText(url.searchParams.get("situation"));
+  const outcome = cleanText(url.searchParams.get("outcome"));
 
   if (!memoryId) {
     return textResponse("Missing memory_id", 400);
   }
 
   const memory = await getMemoryById(db, memoryId);
-
   if (!memory) {
     return textResponse("Memory not found", 404);
   }
+
+  if (!situation || !outcome) {
+    return textResponse(
+      "Challenge now requires situation and outcome so Aren can analyze the experience.",
+      400
+    );
+  }
+
+  const analysis = analyzeReviewOutcome(
+    memory,
+    {
+      situation,
+      judgment: "",
+      outcome,
+      assessment: "challenge"
+    }
+  );
+
+  await db.prepare(`
+    INSERT INTO lesson_challenges
+      (lesson_id, situation, outcome, relevance, strength)
+    VALUES (?, ?, ?, ?, ?)
+  `).bind(
+    memoryId,
+    situation,
+    outcome,
+    analysis.relevance,
+    analysis.strength
+  ).run();
 
   const challenged =
     Number(memory.challenged_count || 0) + 1;
@@ -2061,7 +2101,6 @@ async function handleChallenge(db, url) {
     Number(memory.evidence_count || 0);
 
   let maturity = memory.maturity;
-
   if (challenged >= 2 && challenged >= evidence) {
     maturity = "questioned";
   } else if (evidence >= 3 && challenged === 0) {
@@ -2072,14 +2111,9 @@ async function handleChallenge(db, url) {
 
   await db.prepare(`
     UPDATE memories
-    SET challenged_count = ?,
-        maturity = ?
+    SET challenged_count = ?, maturity = ?
     WHERE id = ?
-  `).bind(
-    challenged,
-    maturity,
-    memoryId
-  ).run();
+  `).bind(challenged, maturity, memoryId).run();
 
   await db.prepare(`
     INSERT INTO memory_history
@@ -2087,15 +2121,23 @@ async function handleChallenge(db, url) {
     VALUES (?, 'challenge', ?, CURRENT_TIMESTAMP)
   `).bind(
     memoryId,
-    `Challenge count increased to ${challenged}`
+    JSON.stringify({
+      situation,
+      outcome,
+      relevance: analysis.relevance,
+      strength: analysis.strength,
+      challenged_count: challenged
+    })
   ).run();
 
   return json({
-    status: "Challenge recorded.",
+    status: "Challenge recorded and analyzed.",
     memory_id: memoryId,
     evidence_count: evidence,
     challenged_count: challenged,
-    maturity
+    maturity,
+    relevance: analysis.relevance,
+    strength: analysis.strength
   });
 }
 
@@ -2674,6 +2716,13 @@ export default {
            ORDER BY j.id ASC`
         ).bind(memoryId).all();
 
+        const standaloneChallenges = await db.prepare(
+          `SELECT id, situation, outcome, strength
+           FROM lesson_challenges
+           WHERE lesson_id = ?
+           ORDER BY id ASC`
+        ).bind(memoryId).all();
+
         let support = 0;
         let challenge = 0;
 
@@ -2681,6 +2730,10 @@ export default {
           const analysis = analyzeReviewOutcome(lesson, row);
           if (row.assessment === "evidence") support += analysis.strength;
           if (row.assessment === "challenge") challenge += analysis.strength;
+        }
+
+        for (const row of (standaloneChallenges.results || [])) {
+          challenge += Number(row.strength || 0);
         }
 
         return json({
