@@ -2385,7 +2385,10 @@ export default {
         );
       }
 
-      if (path === "/execute-development") {
+      if (
+        path === "/execute-development" ||
+        path === "/autonomous-development"
+      ) {
         return await handleExecuteDevelopment(
           db
         );
