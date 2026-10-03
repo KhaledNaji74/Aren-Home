@@ -1385,11 +1385,11 @@ async function analyzeLessonEvidence(db, lessonId) {
       j.judgment,
       j.assessment,
       j.outcome
-    FROM judgments j
-    INNER JOIN lesson_evaluations e
-      ON e.lesson_id = ?
-      AND e.judgment_id = j.id
-    WHERE j.assessment IN ('evidence', 'challenge')
+    FROM development_test_links l
+    INNER JOIN judgments j
+      ON j.id = l.judgment_id
+    WHERE l.lesson_id = ?
+      AND j.assessment IN ('evidence', 'challenge')
     ORDER BY j.id ASC
   `).bind(lessonId).all();
 
@@ -1404,6 +1404,20 @@ async function analyzeLessonEvidence(db, lessonId) {
     } else if (row.assessment === "challenge") {
       challenge += analysis.strength;
     }
+
+    await db.prepare(`
+      INSERT OR IGNORE INTO lesson_evaluations
+        (lesson_id, judgment_id, assessment, outcome, relevance, strength, conclusion)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).bind(
+      lessonId,
+      row.id,
+      row.assessment,
+      row.outcome || "",
+      analysis.relevance,
+      analysis.strength,
+      analysis.conclusion
+    ).run();
   }
 
   support = Number(support.toFixed(6));
@@ -2634,8 +2648,6 @@ export default {
       }
 
       if (path === "/lesson-analysis") {
-        await backfillLessonEvaluations(db);
-
         const memoryId = Number(
           url.searchParams.get("memory_id")
         );
