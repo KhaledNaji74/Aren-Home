@@ -813,14 +813,37 @@ async function filterRepeatedDevelopmentTasks(db, tasks) {
         nothing should create a pause until genuinely new reviewed experience
         exists.
       */
+      /*
+        A task that completed with no relevant experience is now waiting.
+        It becomes eligible again only when a genuinely newer reviewed
+        judgment exists. Use both completed and created as a safe fallback
+        because older task rows may have a null completed timestamp.
+      */
+      let previousResult = {};
+      try {
+        previousResult = JSON.parse(previous.result || "{}");
+      } catch (_) {}
+
+      const noEvidence =
+        previousResult?.finding ===
+        "No new sufficiently relevant reviewed experience was found.";
+
+      const checkpoint =
+        previous.completed ||
+        previous.created ||
+        "1970-01-01";
+
       const newExperience = await db.prepare(`
         SELECT COUNT(*) AS count
         FROM judgments
         WHERE assessment IN ('evidence', 'challenge')
-          AND created > COALESCE(?, '1970-01-01')
-      `).bind(previous.completed).first();
+          AND created > ?
+      `).bind(checkpoint).first();
 
-      if (Number(newExperience?.count || 0) > 0) {
+      if (
+        Number(newExperience?.count || 0) > 0 ||
+        !noEvidence
+      ) {
         filtered.push(task);
       }
 
