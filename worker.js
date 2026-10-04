@@ -807,17 +807,20 @@ async function filterRepeatedDevelopmentTasks(db, tasks) {
     }
 
     if (type === "test_lesson" || type === "gather_evidence") {
-      const pendingExperience = await db.prepare(`
+      /*
+        Do not repeatedly retest a lesson just because old reviewed
+        judgments remain unlinked. A completed evidence search that found
+        nothing should create a pause until genuinely new reviewed experience
+        exists.
+      */
+      const newExperience = await db.prepare(`
         SELECT COUNT(*) AS count
-        FROM judgments j
-        LEFT JOIN development_test_links l
-          ON l.lesson_id = ?
-          AND l.judgment_id = j.id
-        WHERE j.assessment IN ('evidence', 'challenge')
-          AND l.id IS NULL
-      `).bind(target).first();
+        FROM judgments
+        WHERE assessment IN ('evidence', 'challenge')
+          AND created > COALESCE(?, '1970-01-01')
+      `).bind(previous.completed).first();
 
-      if (Number(pendingExperience?.count || 0) > 0) {
+      if (Number(newExperience?.count || 0) > 0) {
         filtered.push(task);
       }
 
