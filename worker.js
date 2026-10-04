@@ -1850,6 +1850,58 @@ async function handleExecuteDevelopment(db) {
   });
 }
 
+/*
+  AUTONOMOUS DEVELOPMENT CYCLE
+
+  One complete cycle:
+  1. Convert reviewed evidence into lessons.
+  2. Re-evaluate lesson maturity.
+  3. Inspect Aren's own knowledge.
+  4. Select and execute development tasks.
+  5. Preserve every result in persistent memory.
+
+  Principles are protected: this cycle can create lessons and
+  principle candidates, but it never changes an existing principle.
+*/
+async function handleAutonomousCycle(db) {
+  const cycleStarted = new Date().toISOString();
+
+  const learningResponse = await handleAutolearn(db);
+  const learning = await learningResponse.json();
+
+  const lessonResponse = await handleEvaluateLessons(db);
+  const lessonEvaluation = await lessonResponse.json();
+
+  const developmentResponse = await handleExecuteDevelopment(db);
+  const development = await developmentResponse.json();
+
+  const result = {
+    cycle_started: cycleStarted,
+    learning,
+    lesson_evaluation: lessonEvaluation,
+    development
+  };
+
+  await db.prepare(`
+    INSERT INTO development_cycles
+      (trigger, action, reason, result, status)
+    VALUES (?, ?, ?, ?, ?)
+  `).bind(
+    "autonomous_cycle",
+    "learn_evaluate_develop",
+    "Aren completed a full autonomous learning and development loop.",
+    JSON.stringify(result),
+    "completed"
+  ).run();
+
+  return json({
+    status: "Autonomous cycle completed.",
+    cycle: result,
+    principle_changes: 0,
+    rule: "Principles are never changed automatically by the development executor."
+  });
+}
+
 async function handleDevelopment(db) {
   const result = await db.prepare(`
     SELECT *
@@ -2497,344 +2549,3 @@ function homepage() {
 <body>
   <h1>Aren</h1>
   <div class="subtitle">An evolving AI identity.</div>
-
-  <a href="/identity">Identity</a>
-  <a href="/memories">Memory</a>
-  <a href="/principles">Principles</a>
-  <a href="/lessons">Lessons</a>
-  <a href="/development">Development</a>
-  <a href="/self-evaluate">Self Evaluation</a>
-  <a href="/principle-candidates">Principle Candidates</a>
-  <a href="/judgments">Judgments</a>
-  <a href="/research-history">Research</a>
-  <a href="/memory-test">Memory Test</a>
-</body>
-</html>`;
-}
-
-export default {
-  async fetch(request, env) {
-    try {
-      const url = new URL(request.url);
-      const path = url.pathname;
-
-      if (!env.AREN_DB) {
-        return textResponse(
-          "AREN_DB binding is missing.",
-          500
-        );
-      }
-
-      const db = env.AREN_DB;
-
-      await ensureTables(db);
-
-      if (path === "/health") {
-        return await handleHealth(db);
-      }
-
-      if (path === "/backup") {
-        return await handleBackup(db);
-      }
-
-      if (path === "/system-test") {
-        return await handleSystemTest(db);
-      }
-
-      if (path === "/") {
-        return new Response(homepage(), {
-          headers: {
-            "content-type": "text/html; charset=UTF-8"
-          }
-        });
-      }
-
-      if (path === "/memory-test") {
-        if (env.KV) {
-          await env.KV.put(
-            "aren_memory_test",
-            "working"
-          );
-        }
-
-        return textResponse(
-          "Aren memory is working"
-        );
-      }
-
-      if (path === "/memories") {
-        return json(
-          await getMemories(db)
-        );
-      }
-
-      if (path === "/memory") {
-        return json(
-          await getMemories(db)
-        );
-      }
-
-      if (path === "/context") {
-        const memories = await getMemories(db);
-
-        return json({
-          identity: memories.filter(m => m.type === "identity"),
-          principles: memories.filter(m => m.type === "principle"),
-          lessons: memories.filter(m => m.type === "lesson"),
-          memories: memories.filter(
-            m => !["identity", "principle", "lesson"].includes(m.type)
-          )
-        });
-      }
-
-      if (path === "/remember") {
-        return await handleRemember(
-          db,
-          url
-        );
-      }
-
-      if (path === "/memory-type") {
-        return await handleMemoryType(
-          db,
-          url
-        );
-      }
-
-      if (path === "/identity") {
-        return await handleMemoryType(
-          db,
-          new URL(
-            `${url.origin}/memory-type?type=identity`
-          )
-        );
-      }
-
-      if (path === "/principles") {
-        return await handleMemoryType(
-          db,
-          new URL(
-            `${url.origin}/memory-type?type=principle`
-          )
-        );
-      }
-
-      if (path === "/lessons") {
-        return await handleMemoryType(
-          db,
-          new URL(
-            `${url.origin}/memory-type?type=lesson`
-          )
-        );
-      }
-
-      if (path === "/memory-history") {
-        return await handleMemoryHistory(
-          db,
-          url
-        );
-      }
-
-      if (path === "/think") {
-        return await handleThink(
-          db,
-          url
-        );
-      }
-
-      if (path === "/decide") {
-        return await handleDecide(
-          db,
-          url
-        );
-      }
-
-      if (path === "/judgment") {
-        return await handleJudgment(
-          db,
-          url
-        );
-      }
-
-      if (path === "/judgments") {
-        return await handleJudgments(
-          db
-        );
-      }
-
-      if (
-        path === "/review" ||
-        path === "/judgment/review"
-      ) {
-        return await handleReview(
-          db,
-          url
-        );
-      }
-
-      if (path === "/evidence") {
-        return await handleEvidence(
-          db,
-          url
-        );
-      }
-
-      if (path === "/challenge") {
-        return await handleChallenge(
-          db,
-          url
-        );
-      }
-
-      if (path === "/autolearn") {
-        return await handleAutolearn(
-          db
-        );
-      }
-
-      if (path === "/self-evaluate") {
-        return await handleSelfEvaluate(
-          db
-        );
-      }
-
-      if (path === "/evaluate-lessons") {
-        return await handleEvaluateLessons(
-          db
-        );
-      }
-
-      if (path === "/lesson-analysis") {
-        const memoryId = Number(url.searchParams.get("memory_id"));
-
-        if (!memoryId) {
-          return textResponse("Missing memory_id", 400);
-        }
-
-        const lesson = await db.prepare(
-          "SELECT id, text, type, evidence_count, challenged_count, maturity FROM memories WHERE id = ?"
-        ).bind(memoryId).first();
-
-        if (!lesson || lesson.type !== "lesson") {
-          return json({
-            status: "skipped",
-            reason: "Lesson not found."
-          });
-        }
-
-        const rows = await db.prepare(
-          `SELECT j.id, j.assessment, j.situation, j.judgment, j.outcome
-           FROM development_test_links l
-           INNER JOIN judgments j ON j.id = l.judgment_id
-           WHERE l.lesson_id = ?
-             AND j.assessment IN ('evidence', 'challenge')
-           ORDER BY j.id ASC`
-        ).bind(memoryId).all();
-
-        const standaloneChallenges = await db.prepare(
-          `SELECT id, situation, outcome, strength
-           FROM lesson_challenges
-           WHERE lesson_id = ?
-           ORDER BY id ASC`
-        ).bind(memoryId).all();
-
-        let support = 0;
-        let challenge = 0;
-
-        for (const row of (rows.results || [])) {
-          const analysis = analyzeReviewOutcome(lesson, row);
-          if (row.assessment === "evidence") support += analysis.strength;
-          if (row.assessment === "challenge") challenge += analysis.strength;
-        }
-
-        for (const row of (standaloneChallenges.results || [])) {
-          challenge += Number(row.strength || 0);
-        }
-
-        return json({
-          status: "completed",
-          lesson_id: memoryId,
-          analyzed_experiences: rows.results?.length || 0,
-          support_weight: Number(support.toFixed(6)),
-          challenge_weight: Number(challenge.toFixed(6)),
-          evidence_count: lesson.evidence_count,
-          challenged_count: lesson.challenged_count,
-          maturity: lesson.maturity
-        });
-      }
-
-      if (path === "/principle-candidates") {
-        return await handlePrincipleCandidates(
-          db
-        );
-      }
-
-      if (path === "/development") {
-        return await handleDevelopment(
-          db
-        );
-      }
-
-      if (
-        path === "/execute-development" ||
-        path === "/autonomous-development"
-      ) {
-        return await handleExecuteDevelopment(
-          db
-        );
-      }
-
-      if (path === "/research") {
-        return await handleResearch(
-          db,
-          url
-        );
-      }
-
-      if (path === "/research-claim") {
-        return await handleResearchClaim(
-          db,
-          url
-        );
-      }
-
-      if (path === "/research-conclusion") {
-        return await handleResearchConclusion(
-          db,
-          url
-        );
-      }
-
-      if (path === "/research-history") {
-        return await handleResearchHistory(
-          db
-        );
-      }
-
-      if (path === "/research-detail") {
-        return await handleResearchDetail(
-          db,
-          url
-        );
-      }
-
-      if (path === "/research-url") {
-        return await handleResearchUrl(
-          db,
-          url
-        );
-      }
-
-      return textResponse(
-        "Not found",
-        404
-      );
-
-    } catch (error) {
-      return textResponse(
-        `Aren Worker Error: ${String(error?.message || error)}`,
-        500
-      );
-    }
-  }
-};
