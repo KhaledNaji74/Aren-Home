@@ -5,6 +5,11 @@
   "assets": {
     "directory": "public"
   },
+  "triggers": {
+    "crons": [
+      "0 * * * *"
+    ]
+  },
   "kv_namespaces": [
     {
       "binding": "KV",
