@@ -269,6 +269,21 @@ async function ensureTables(db) {
   `).run();
 
   await db.prepare(`
+    CREATE TABLE IF NOT EXISTS research_evidence (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      research_id INTEGER NOT NULL,
+      claim_id INTEGER NOT NULL,
+      lesson_id INTEGER NOT NULL,
+      evidence TEXT NOT NULL,
+      assessment TEXT NOT NULL,
+      relevance REAL DEFAULT 0,
+      strength REAL DEFAULT 0,
+      confidence INTEGER DEFAULT 1,
+      created DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `).run();
+
+  await db.prepare(`
     CREATE TABLE IF NOT EXISTS lesson_challenges (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       lesson_id INTEGER NOT NULL,
@@ -2339,6 +2354,168 @@ async function handleResearchConclusion(db, url) {
   });
 }
 
+async function handleResearchEvidence(db, url) {
+  const researchId = Number(url.searchParams.get("research_id"));
+  const claimId = Number(url.searchParams.get("claim_id"));
+  const lessonId = Number(url.searchParams.get("lesson_id"));
+  const evidence = cleanText(url.searchParams.get("evidence"));
+  const assessment = cleanText(url.searchParams.get("assessment")).toLowerCase();
+  const confidence = Math.max(1, Math.min(5, Number(url.searchParams.get("confidence") || 1)));
+
+  if (!researchId || !claimId || !lessonId || !evidence) {
+    return textResponse(
+      "Missing research_id, claim_id, lesson_id, or evidence",
+      400
+    );
+  }
+
+  if (!["evidence", "challenge", "neutral"].includes(assessment)) {
+    return textResponse(
+      "Assessment must be evidence, challenge, or neutral",
+      400
+    );
+  }
+
+  const research = await db.prepare(
+    "SELECT id, question, source, status FROM research WHERE id = ?"
+  ).bind(researchId).first();
+
+  if (!research) {
+    return textResponse("Research not found", 404);
+  }
+
+  const claim = await db.prepare(
+    "SELECT id, research_id, claim, evidence, confidence FROM research_claims WHERE id = ?"
+  ).bind(claimId).first();
+
+  if (!claim || Number(claim.research_id) !== researchId) {
+    return textResponse("Research claim not found for this research", 404);
+  }
+
+  const lesson = await getMemoryById(db, lessonId);
+
+  if (!lesson || lesson.type !== "lesson") {
+    return textResponse("Lesson not found", 404);
+  }
+
+  const relevance = relevanceScore(
+    cleanText(claim.claim + " " + evidence),
+    lesson
+  );
+
+  if (relevance < 0.30) {
+    return json({
+      status: "Research evidence rejected.",
+      reason: "The claim/evidence is not sufficiently relevant to the selected lesson.",
+      relevance
+    }, 422);
+  }
+
+  const assessmentWeight =
+    assessment === "evidence" ? 1 :
+    assessment === "challenge" ? 1 : 0;
+
+  const strength = Number(
+    Math.min(
+      1,
+      relevance *
+      (0.5 + confidence * 0.1) *
+      assessmentWeight
+    ).toFixed(6)
+  );
+
+  const inserted = await db.prepare(`
+    INSERT INTO research_evidence
+      (research_id, claim_id, lesson_id, evidence, assessment, relevance, strength, confidence)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).bind(
+    researchId,
+    claimId,
+    lessonId,
+    evidence,
+    assessment,
+    relevance,
+    strength,
+    confidence
+  ).run();
+
+  if (assessment !== "neutral") {
+    const current = await getMemoryById(db, lessonId);
+    const evidenceCount =
+      Number(current.evidence_count || 0) +
+      (assessment === "evidence" ? 1 : 0);
+    const challengedCount =
+      Number(current.challenged_count || 0) +
+      (assessment === "challenge" ? 1 : 0);
+
+    let maturity = current.maturity || "new";
+
+    if (challengedCount >= 2 && challengedCount >= evidenceCount) {
+      maturity = "questioned";
+    } else if (evidenceCount >= 3 && challengedCount === 0) {
+      maturity = "mature";
+    } else if (evidenceCount >= 1 || challengedCount >= 1) {
+      maturity = "tested";
+    }
+
+    await db.prepare(`
+      UPDATE memories
+      SET evidence_count = ?,
+          challenged_count = ?,
+          maturity = ?
+      WHERE id = ?
+    `).bind(
+      evidenceCount,
+      challengedCount,
+      maturity,
+      lessonId
+    ).run();
+
+    await db.prepare(`
+      INSERT INTO memory_history
+        (memory_id, event, details, created)
+      VALUES (?, 'research_evidence', ?, CURRENT_TIMESTAMP)
+    `).bind(
+      lessonId,
+      JSON.stringify({
+        research_id: researchId,
+        claim_id: claimId,
+        assessment,
+        relevance,
+        strength,
+        confidence
+      })
+    ).run();
+
+    return json({
+      status: "Research evidence evaluated.",
+      research_id: researchId,
+      claim_id: claimId,
+      lesson_id: lessonId,
+      evidence_id: inserted.meta?.last_row_id || null,
+      assessment,
+      relevance,
+      strength,
+      evidence_count: evidenceCount,
+      challenged_count: challengedCount,
+      maturity,
+      principle_changed: false
+    });
+  }
+
+  return json({
+    status: "Research evidence recorded as neutral.",
+    research_id: researchId,
+    claim_id: claimId,
+    lesson_id: lessonId,
+    evidence_id: inserted.meta?.last_row_id || null,
+    assessment,
+    relevance,
+    strength: 0,
+    principle_changed: false
+  });
+}
+
 async function handleResearchHistory(db) {
   const result = await db.prepare(`
     SELECT *
@@ -2952,6 +3129,13 @@ export default {
       if (path === "/research-history") {
         return await handleResearchHistory(
           db
+        );
+      }
+
+      if (path === "/research-evidence") {
+        return await handleResearchEvidence(
+          db,
+          url
         );
       }
 
