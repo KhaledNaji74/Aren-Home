@@ -2693,6 +2693,7 @@ async function handleHealth(db) {
     "research",
     "research_claims",
     "research_conclusions",
+    "research_evidence",
     "schema_migrations"
   ];
 
