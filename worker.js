@@ -2393,51 +2393,116 @@ async function handleResearchDetail(db, url) {
   });
 }
 
-async function handleResearchUrl(db, url) {
-  const target = cleanText(
-    url.searchParams.get("url")
-  );
-
-  if (!target) {
-    return textResponse("Missing url", 400);
+function validateResearchTarget(raw) {
+  let target;
+  try { target = new URL(raw); }
+  catch (_) { return { ok: false, reason: "Invalid source URL." }; }
+  if (!["http:", "https:"].includes(target.protocol) || target.username || target.password) {
+    return { ok: false, reason: "Only public HTTP/HTTPS URLs without credentials are allowed." };
   }
-
-  try {
-    const response = await fetch(target);
-
-    const contentType =
-      response.headers.get("content-type") || "";
-
-    const body = await response.text();
-
-    const limitedBody = body.slice(0, 20000);
-
-    const result = await db.prepare(`
-      INSERT INTO research
-        (question, source, answer, status)
-      VALUES (?, ?, ?, 'completed')
-    `).bind(
-      `Research source: ${target}`,
-      target,
-      limitedBody
-    ).run();
-
-    return json({
-      status: "Research source retrieved.",
-      research_id: result.meta?.last_row_id || null,
-      source: target,
-      content_type: contentType,
-      content: limitedBody
-    });
-  } catch (error) {
-    return json({
-      status: "Research source failed.",
-      source: target,
-      error: String(error?.message || error)
-    }, 500);
+  if (target.port && !["80", "443"].includes(target.port)) {
+    return { ok: false, reason: "Only standard web ports are allowed." };
   }
+  const host = target.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  if (!host || host === "localhost" || host.endsWith(".localhost") ||
+      host.endsWith(".local") || host.endsWith(".internal") || host.includes(":")) {
+    return { ok: false, reason: "Local or non-public hostnames are not allowed." };
+  }
+  const parts = host.split(".");
+  if (parts.length === 4 && parts.every(part => /^\d+$/.test(part))) {
+    const ip = parts.map(Number);
+    const [a, b] = ip;
+    if (ip.some(part => part > 255) || a === 0 || a === 10 || a === 127 ||
+        (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) ||
+        (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127) || a >= 224) {
+      return { ok: false, reason: "Private or reserved IP addresses are not allowed." };
+    }
+  }
+  target.hash = "";
+  return { ok: true, url: target };
 }
 
+function readableResearchText(body, contentType) {
+  if (/text\/plain|application\/json|application\/xml|text\/xml/i.test(contentType)) {
+    return body.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+  }
+  return body
+    .replace(/<!--[\s\S]*?-->/g, " ")
+    .replace(/<(script|style|noscript|svg|nav|footer|header)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, " ")
+    .replace(/<(br|\/p|\/div|\/li|\/h[1-6]|\/article|\/section)\b[^>]*>/gi, "\n")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/gi, " ").replace(/&amp;/gi, "&").replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">").replace(/&quot;/gi, '"').replace(/&#39;|&apos;/gi, "'")
+    .replace(/[ \t]+/g, " ").replace(/\n\s*\n+/g, "\n").trim();
+}
+
+async function handleResearchUrl(db, url) {
+  const rawTarget = cleanText(url.searchParams.get("url"));
+  if (!rawTarget) return textResponse("Missing url", 400);
+
+  const checked = validateResearchTarget(rawTarget);
+  if (!checked.ok) return json({ status: "Research source rejected.", reason: checked.reason }, 400);
+  const target = checked.url;
+
+  try {
+    const response = await fetch(target.toString(), {
+      method: "GET",
+      redirect: "manual",
+      headers: { "accept": "text/html,text/plain,application/json,application/xml,text/xml;q=0.9" },
+      signal: AbortSignal.timeout(10000)
+    });
+    if (response.status >= 300 && response.status < 400) {
+      return json({ status: "Research source not followed.", reason: "Submit the final public URL directly.", http_status: response.status }, 400);
+    }
+    if (!response.ok) return json({ status: "Research source failed.", http_status: response.status }, 502);
+
+    const contentType = response.headers.get("content-type") || "";
+    if (!/(text\/html|text\/plain|application\/json|application\/xml|text\/xml)/i.test(contentType)) {
+      return json({ status: "Research source rejected.", reason: "Only text, HTML, JSON, and XML are supported." }, 415);
+    }
+    const maxBytes = 200000;
+    if (Number(response.headers.get("content-length") || 0) > maxBytes) {
+      return json({ status: "Research source rejected.", reason: "Source exceeds the 200 KB limit." }, 413);
+    }
+    const reader = response.body?.getReader();
+    if (!reader) return json({ status: "Research source failed.", reason: "No readable response body." }, 502);
+    const chunks = [];
+    let totalBytes = 0;
+    while (true) {
+      const part = await reader.read();
+      if (part.done) break;
+      totalBytes += part.value.byteLength;
+      if (totalBytes > maxBytes) {
+        await reader.cancel();
+        return json({ status: "Research source rejected.", reason: "Source exceeds the 200 KB limit." }, 413);
+      }
+      chunks.push(part.value);
+    }
+    const bytes = new Uint8Array(totalBytes);
+    let offset = 0;
+    for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+    const rawBody = new TextDecoder("utf-8").decode(bytes);
+    const content = readableResearchText(rawBody, contentType).slice(0, 20000);
+    if (!content) return json({ status: "Research source failed.", reason: "No readable text found." }, 422);
+
+    const result = await db.prepare(\`
+      INSERT INTO research (question, source, answer, status)
+      VALUES (?, ?, ?, 'source_saved')
+    \`).bind("Source collected for review: " + target.toString(), target.toString(), content).run();
+
+    return json({
+      status: "Research source saved for evaluation.",
+      research_id: result.meta?.last_row_id || null,
+      source: target.toString(),
+      content_type: contentType,
+      characters_saved: content.length,
+      note: "Retrieved text is unverified evidence, not an established fact or conclusion."
+    });
+  } catch (error) {
+    return json({ status: "Research source failed.", source: target.toString(),
+      error: String(error?.message || error) }, 502);
+  }
+}
 
 async function handleHealth(db) {
   const requiredTables = [
