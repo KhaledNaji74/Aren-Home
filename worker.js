@@ -2485,10 +2485,10 @@ async function handleResearchUrl(db, url) {
     const content = readableResearchText(rawBody, contentType).slice(0, 20000);
     if (!content) return json({ status: "Research source failed.", reason: "No readable text found." }, 422);
 
-    const result = await db.prepare(\`
+    const result = await db.prepare(`
       INSERT INTO research (question, source, answer, status)
       VALUES (?, ?, ?, 'source_saved')
-    \`).bind("Source collected for review: " + target.toString(), target.toString(), content).run();
+    `).bind("Source collected for review: " + target.toString(), target.toString(), content).run();
 
     return json({
       status: "Research source saved for evaluation.",
