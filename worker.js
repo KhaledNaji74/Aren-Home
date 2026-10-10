@@ -269,6 +269,21 @@ async function ensureTables(db) {
   `).run();
 
   await db.prepare(`
+    CREATE TABLE IF NOT EXISTS research_evidence (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      research_id INTEGER NOT NULL,
+      claim_id INTEGER NOT NULL,
+      lesson_id INTEGER NOT NULL,
+      evidence TEXT NOT NULL,
+      assessment TEXT NOT NULL,
+      relevance REAL DEFAULT 0,
+      strength REAL DEFAULT 0,
+      confidence INTEGER DEFAULT 1,
+      created DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `).run();
+
+  await db.prepare(`
     CREATE TABLE IF NOT EXISTS lesson_challenges (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       lesson_id INTEGER NOT NULL,
@@ -2339,6 +2354,168 @@ async function handleResearchConclusion(db, url) {
   });
 }
 
+async function handleResearchEvidence(db, url) {
+  const researchId = Number(url.searchParams.get("research_id"));
+  const claimId = Number(url.searchParams.get("claim_id"));
+  const lessonId = Number(url.searchParams.get("lesson_id"));
+  const evidence = cleanText(url.searchParams.get("evidence"));
+  const assessment = cleanText(url.searchParams.get("assessment")).toLowerCase();
+  const confidence = Math.max(1, Math.min(5, Number(url.searchParams.get("confidence") || 1)));
+
+  if (!researchId || !claimId || !lessonId || !evidence) {
+    return textResponse(
+      "Missing research_id, claim_id, lesson_id, or evidence",
+      400
+    );
+  }
+
+  if (!["evidence", "challenge", "neutral"].includes(assessment)) {
+    return textResponse(
+      "Assessment must be evidence, challenge, or neutral",
+      400
+    );
+  }
+
+  const research = await db.prepare(
+    "SELECT id, question, source, status FROM research WHERE id = ?"
+  ).bind(researchId).first();
+
+  if (!research) {
+    return textResponse("Research not found", 404);
+  }
+
+  const claim = await db.prepare(
+    "SELECT id, research_id, claim, evidence, confidence FROM research_claims WHERE id = ?"
+  ).bind(claimId).first();
+
+  if (!claim || Number(claim.research_id) !== researchId) {
+    return textResponse("Research claim not found for this research", 404);
+  }
+
+  const lesson = await getMemoryById(db, lessonId);
+
+  if (!lesson || lesson.type !== "lesson") {
+    return textResponse("Lesson not found", 404);
+  }
+
+  const relevance = relevanceScore(
+    cleanText(claim.claim + " " + evidence),
+    lesson
+  );
+
+  if (relevance < 0.30) {
+    return json({
+      status: "Research evidence rejected.",
+      reason: "The claim/evidence is not sufficiently relevant to the selected lesson.",
+      relevance
+    }, 422);
+  }
+
+  const assessmentWeight =
+    assessment === "evidence" ? 1 :
+    assessment === "challenge" ? 1 : 0;
+
+  const strength = Number(
+    Math.min(
+      1,
+      relevance *
+      (0.5 + confidence * 0.1) *
+      assessmentWeight
+    ).toFixed(6)
+  );
+
+  const inserted = await db.prepare(`
+    INSERT INTO research_evidence
+      (research_id, claim_id, lesson_id, evidence, assessment, relevance, strength, confidence)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).bind(
+    researchId,
+    claimId,
+    lessonId,
+    evidence,
+    assessment,
+    relevance,
+    strength,
+    confidence
+  ).run();
+
+  if (assessment !== "neutral") {
+    const current = await getMemoryById(db, lessonId);
+    const evidenceCount =
+      Number(current.evidence_count || 0) +
+      (assessment === "evidence" ? 1 : 0);
+    const challengedCount =
+      Number(current.challenged_count || 0) +
+      (assessment === "challenge" ? 1 : 0);
+
+    let maturity = current.maturity || "new";
+
+    if (challengedCount >= 2 && challengedCount >= evidenceCount) {
+      maturity = "questioned";
+    } else if (evidenceCount >= 3 && challengedCount === 0) {
+      maturity = "mature";
+    } else if (evidenceCount >= 1 || challengedCount >= 1) {
+      maturity = "tested";
+    }
+
+    await db.prepare(`
+      UPDATE memories
+      SET evidence_count = ?,
+          challenged_count = ?,
+          maturity = ?
+      WHERE id = ?
+    `).bind(
+      evidenceCount,
+      challengedCount,
+      maturity,
+      lessonId
+    ).run();
+
+    await db.prepare(`
+      INSERT INTO memory_history
+        (memory_id, event, details, created)
+      VALUES (?, 'research_evidence', ?, CURRENT_TIMESTAMP)
+    `).bind(
+      lessonId,
+      JSON.stringify({
+        research_id: researchId,
+        claim_id: claimId,
+        assessment,
+        relevance,
+        strength,
+        confidence
+      })
+    ).run();
+
+    return json({
+      status: "Research evidence evaluated.",
+      research_id: researchId,
+      claim_id: claimId,
+      lesson_id: lessonId,
+      evidence_id: inserted.meta?.last_row_id || null,
+      assessment,
+      relevance,
+      strength,
+      evidence_count: evidenceCount,
+      challenged_count: challengedCount,
+      maturity,
+      principle_changed: false
+    });
+  }
+
+  return json({
+    status: "Research evidence recorded as neutral.",
+    research_id: researchId,
+    claim_id: claimId,
+    lesson_id: lessonId,
+    evidence_id: inserted.meta?.last_row_id || null,
+    assessment,
+    relevance,
+    strength: 0,
+    principle_changed: false
+  });
+}
+
 async function handleResearchHistory(db) {
   const result = await db.prepare(`
     SELECT *
@@ -2393,51 +2570,116 @@ async function handleResearchDetail(db, url) {
   });
 }
 
-async function handleResearchUrl(db, url) {
-  const target = cleanText(
-    url.searchParams.get("url")
-  );
-
-  if (!target) {
-    return textResponse("Missing url", 400);
+function validateResearchTarget(raw) {
+  let target;
+  try { target = new URL(raw); }
+  catch (_) { return { ok: false, reason: "Invalid source URL." }; }
+  if (!["http:", "https:"].includes(target.protocol) || target.username || target.password) {
+    return { ok: false, reason: "Only public HTTP/HTTPS URLs without credentials are allowed." };
   }
-
-  try {
-    const response = await fetch(target);
-
-    const contentType =
-      response.headers.get("content-type") || "";
-
-    const body = await response.text();
-
-    const limitedBody = body.slice(0, 20000);
-
-    const result = await db.prepare(`
-      INSERT INTO research
-        (question, source, answer, status)
-      VALUES (?, ?, ?, 'completed')
-    `).bind(
-      `Research source: ${target}`,
-      target,
-      limitedBody
-    ).run();
-
-    return json({
-      status: "Research source retrieved.",
-      research_id: result.meta?.last_row_id || null,
-      source: target,
-      content_type: contentType,
-      content: limitedBody
-    });
-  } catch (error) {
-    return json({
-      status: "Research source failed.",
-      source: target,
-      error: String(error?.message || error)
-    }, 500);
+  if (target.port && !["80", "443"].includes(target.port)) {
+    return { ok: false, reason: "Only standard web ports are allowed." };
   }
+  const host = target.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  if (!host || host === "localhost" || host.endsWith(".localhost") ||
+      host.endsWith(".local") || host.endsWith(".internal") || host.includes(":")) {
+    return { ok: false, reason: "Local or non-public hostnames are not allowed." };
+  }
+  const parts = host.split(".");
+  if (parts.length === 4 && parts.every(part => /^\d+$/.test(part))) {
+    const ip = parts.map(Number);
+    const [a, b] = ip;
+    if (ip.some(part => part > 255) || a === 0 || a === 10 || a === 127 ||
+        (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) ||
+        (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127) || a >= 224) {
+      return { ok: false, reason: "Private or reserved IP addresses are not allowed." };
+    }
+  }
+  target.hash = "";
+  return { ok: true, url: target };
 }
 
+function readableResearchText(body, contentType) {
+  if (/text\/plain|application\/json|application\/xml|text\/xml/i.test(contentType)) {
+    return body.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+  }
+  return body
+    .replace(/<!--[\s\S]*?-->/g, " ")
+    .replace(/<(script|style|noscript|svg|nav|footer|header)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, " ")
+    .replace(/<(br|\/p|\/div|\/li|\/h[1-6]|\/article|\/section)\b[^>]*>/gi, "\n")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/gi, " ").replace(/&amp;/gi, "&").replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">").replace(/&quot;/gi, '"').replace(/&#39;|&apos;/gi, "'")
+    .replace(/[ \t]+/g, " ").replace(/\n\s*\n+/g, "\n").trim();
+}
+
+async function handleResearchUrl(db, url) {
+  const rawTarget = cleanText(url.searchParams.get("url"));
+  if (!rawTarget) return textResponse("Missing url", 400);
+
+  const checked = validateResearchTarget(rawTarget);
+  if (!checked.ok) return json({ status: "Research source rejected.", reason: checked.reason }, 400);
+  const target = checked.url;
+
+  try {
+    const response = await fetch(target.toString(), {
+      method: "GET",
+      redirect: "manual",
+      headers: { "accept": "text/html,text/plain,application/json,application/xml,text/xml;q=0.9" },
+      signal: AbortSignal.timeout(10000)
+    });
+    if (response.status >= 300 && response.status < 400) {
+      return json({ status: "Research source not followed.", reason: "Submit the final public URL directly.", http_status: response.status }, 400);
+    }
+    if (!response.ok) return json({ status: "Research source failed.", http_status: response.status }, 502);
+
+    const contentType = response.headers.get("content-type") || "";
+    if (!/(text\/html|text\/plain|application\/json|application\/xml|text\/xml)/i.test(contentType)) {
+      return json({ status: "Research source rejected.", reason: "Only text, HTML, JSON, and XML are supported." }, 415);
+    }
+    const maxBytes = 200000;
+    if (Number(response.headers.get("content-length") || 0) > maxBytes) {
+      return json({ status: "Research source rejected.", reason: "Source exceeds the 200 KB limit." }, 413);
+    }
+    const reader = response.body?.getReader();
+    if (!reader) return json({ status: "Research source failed.", reason: "No readable response body." }, 502);
+    const chunks = [];
+    let totalBytes = 0;
+    while (true) {
+      const part = await reader.read();
+      if (part.done) break;
+      totalBytes += part.value.byteLength;
+      if (totalBytes > maxBytes) {
+        await reader.cancel();
+        return json({ status: "Research source rejected.", reason: "Source exceeds the 200 KB limit." }, 413);
+      }
+      chunks.push(part.value);
+    }
+    const bytes = new Uint8Array(totalBytes);
+    let offset = 0;
+    for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+    const rawBody = new TextDecoder("utf-8").decode(bytes);
+    const content = readableResearchText(rawBody, contentType).slice(0, 20000);
+    if (!content) return json({ status: "Research source failed.", reason: "No readable text found." }, 422);
+
+    const result = await db.prepare(`
+      INSERT INTO research (question, source, answer, status)
+      VALUES (?, ?, ?, 'source_saved')
+    `).bind("Source collected for review: " + target.toString(), target.toString(), content).run();
+
+    return json({
+      status: "Research source saved for evaluation.",
+      research_id: result.meta?.last_row_id || null,
+      source: target.toString(),
+      content_type: contentType,
+      characters_saved: content.length,
+      note: "Retrieved text is unverified evidence, not an established fact or conclusion."
+    });
+  } catch (error) {
+    return json({ status: "Research source failed.", source: target.toString(),
+      error: String(error?.message || error) }, 502);
+  }
+}
 
 async function handleHealth(db) {
   const requiredTables = [
@@ -2451,6 +2693,7 @@ async function handleHealth(db) {
     "research",
     "research_claims",
     "research_conclusions",
+    "research_evidence",
     "schema_migrations"
   ];
 
@@ -2890,6 +3133,13 @@ export default {
         );
       }
 
+      if (path === "/research-evidence") {
+        return await handleResearchEvidence(
+          db,
+          url
+        );
+      }
+
       if (path === "/research-detail") {
         return await handleResearchDetail(
           db,
@@ -2928,3 +3178,5 @@ export default {
     }
   }
 };
+
+
