@@ -2944,7 +2944,11 @@ async function handleResearchDiscover(db, url) {
     const words = new Set(text.split(" "));
     let exactHits = 0;
     for (const term of topicTerms) {
-      if (words.has(term) || (term.length > 4 && text.includes(term))) exactHits++;
+      const variants = [term];
+      if (term.endsWith("ies") && term.length > 4) variants.push(term.slice(0, -3) + "y");
+      if (term.endsWith("s") && term.length > 3) variants.push(term.slice(0, -1));
+      if (term.endsWith("es") && term.length > 4) variants.push(term.slice(0, -2));
+      if (variants.some(variant => words.has(variant) || (variant.length > 4 && text.includes(variant)))) exactHits++;
     }
     const groupHits = termGroups.filter(group =>
       group.some(term => words.has(term))
@@ -3044,19 +3048,57 @@ async function handleResearchDiscover(db, url) {
       }
 
       const summary = await summaryResponse.json();
-      const extract = String(summary.extract || "");
+      let extract = String(summary.extract || "");
+      let contentLabel = "Retrieved summary";
+
+      // Short summaries are too thin for research review. Try a fuller plain-text extract.
+      if (extract.length < 1000) {
+        try {
+          const fullUrl = new URL("https://en.wikipedia.org/w/api.php");
+          fullUrl.search = new URLSearchParams({
+            action: "query",
+            prop: "extracts",
+            exintro: "0",
+            explaintext: "1",
+            exsectionformat: "plain",
+            titles: title,
+            format: "json",
+            utf8: "1"
+          }).toString();
+          const fullResponse = await fetch(fullUrl.toString(), {
+            headers: {
+              "accept": "application/json",
+              "user-agent": "Aren-Home/1.0 (research source discovery)"
+            },
+            signal: AbortSignal.timeout(10000)
+          });
+          if (fullResponse.ok) {
+            const fullData = await fullResponse.json();
+            const pages = fullData?.query?.pages || {};
+            const page = Object.values(pages)[0];
+            const fullExtract = String(page?.extract || "").trim();
+            if (fullExtract.length > extract.length) {
+              extract = fullExtract;
+              contentLabel = "Retrieved article extract";
+            }
+          }
+        } catch (_) {
+          // Keep the available summary; it remains unverified.
+        }
+      }
+
       if (!extract.trim()) {
-        skipped.push({ title, reason: "No readable article summary." });
+        skipped.push({ title, reason: "No readable article summary or extract." });
         continue;
       }
 
       const content = [
         "Title: " + String(summary.title || title),
-        summary.description ? "Description: " + String(summary.description) : "",
-        "Retrieved summary: " + extract
+        summary.description ? "Description: " + summary.description : "",
+        contentLabel + ": " + extract
       ].filter(Boolean).join("\n").slice(0, 20000);
 
-      const score = relevanceScore(content);
+      const score = relevanceScore("Title: " + title + "\n" + content);
       if (!relevantEnough(content)) {
         skipped.push({
           title,
