@@ -16,6 +16,14 @@
       "id": "41180744928f43ce8c599014cb460337"
     }
   ],
+  "previews": {
+    "d1_databases": [
+      {
+        "binding": "AREN_DB",
+        "database_id": "43d8dd99-79f8-4960-800c-5321bd0aaf9a"
+      }
+    ]
+  },
   "d1_databases": [
     {
       "binding": "AREN_DB",
