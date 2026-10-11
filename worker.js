@@ -3106,11 +3106,25 @@ async function handleResearchDiscover(db, url) {
 
       const scoredText = "Title: " + title + "\n" + content;
       const score = relevanceScore(scoredText);
-      if (!relevantEnough(scoredText)) {
+      const titleScore = relevanceScore(title);
+      const bodyScore = relevanceScore(content);
+      const normalizedTitle = normalize(title);
+      const titleIsOnTopic =
+        /\b(decision|decisions|decision making|judgment|judgement|decision theory|outcome bias|rational choice)\b/.test(normalizedTitle);
+      const bodyHasTopicEvidence =
+        bodyScore.exactHits >= 1 || bodyScore.groupHits >= 1;
+      const bodyHasStrongEvidence =
+        bodyScore.exactHits >= 3 ||
+        (bodyScore.exactHits >= 2 && bodyScore.groupHits >= 2);
+      // Prefer sources whose title names the research topic. Otherwise require
+      // stronger evidence in the article body; generic keyword overlap is insufficient.
+      if (!((titleIsOnTopic && bodyHasTopicEvidence) || bodyHasStrongEvidence)) {
         skipped.push({
           title,
           reason: "Rejected by the initial relevance filter.",
-          relevance_score: score
+          relevance_score: score,
+          title_relevance: titleScore,
+          body_relevance: bodyScore
         });
         continue;
       }
