@@ -2050,6 +2050,8 @@ async function handleAutonomousCycle(db) {
   const researchResponse = await handleSelfDirectedResearch(db);
   const selfDirectedResearch = await researchResponse.json();
 
+  const researchDiscovery = await handleAutonomousResearchDiscovery(db);
+
   const developmentResponse = await handleExecuteDevelopment(db);
   const development = await developmentResponse.json();
 
@@ -2058,6 +2060,7 @@ async function handleAutonomousCycle(db) {
     learning,
     lesson_evaluation: lessonEvaluation,
     self_directed_research: selfDirectedResearch,
+    research_discovery: researchDiscovery,
     development
   };
 
@@ -2886,6 +2889,175 @@ async function handleResearchUrl(db, url) {
   }
 }
 
+async function handleResearchDiscover(db, url) {
+  const researchId = Number(url.searchParams.get("research_id") || 0);
+  if (!Number.isSafeInteger(researchId) || researchId < 1) {
+    return textResponse("Missing or invalid research_id", 400);
+  }
+
+  const research = await db.prepare(
+    "SELECT id, question, status FROM research WHERE id = ?"
+  ).bind(researchId).first();
+
+  if (!research) {
+    return json({ status: "Research not found.", research_id: researchId }, 404);
+  }
+
+  const quoted = String(research.question || "").match(/"([^"]{3,300})"/);
+  const searchTerm = (quoted ? quoted[1] : String(research.question || ""))
+    .replace(/^(what reliable evidence supports or challenges this untested lesson:|what reliable evidence supports or challenges this lesson:|compare the supporting and challenging reviewed experiences for this lesson:)/i, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 180);
+
+  if (!searchTerm) {
+    return json({ status: "No usable research terms found.", research_id: researchId }, 422);
+  }
+
+  try {
+    const searchUrl = new URL("https://en.wikipedia.org/w/api.php");
+    searchUrl.search = new URLSearchParams({
+      action: "query",
+      list: "search",
+      srsearch: searchTerm,
+      format: "json",
+      utf8: "1",
+      srlimit: "5"
+    }).toString();
+
+    const searchResponse = await fetch(searchUrl.toString(), {
+      headers: { "accept": "application/json", "user-agent": "Aren-Home/1.0 (research source discovery)" },
+      signal: AbortSignal.timeout(10000)
+    });
+
+    if (!searchResponse.ok) {
+      return json({ status: "Research discovery failed.", http_status: searchResponse.status }, 502);
+    }
+
+    const searchData = await searchResponse.json();
+    const candidates = (searchData?.query?.search || []).slice(0, 5);
+    const saved = [];
+    const skipped = [];
+
+    for (const candidate of candidates) {
+      const title = String(candidate.title || "").trim();
+      if (!title) continue;
+
+      const articleUrl = "https://en.wikipedia.org/wiki/" +
+        encodeURIComponent(title.replace(/ /g, "_"));
+
+      const existing = await db.prepare(
+        "SELECT id FROM research_sources WHERE research_id = ? AND source_url = ? LIMIT 1"
+      ).bind(researchId, articleUrl).first();
+
+      if (existing) {
+        skipped.push({ title, reason: "Already attached to this research question." });
+        continue;
+      }
+
+      const summaryUrl = "https://en.wikipedia.org/api/rest_v1/page/summary/" +
+        encodeURIComponent(title.replace(/ /g, "_"));
+      const summaryResponse = await fetch(summaryUrl, {
+        headers: { "accept": "application/json", "user-agent": "Aren-Home/1.0 (research source discovery)" },
+        signal: AbortSignal.timeout(10000)
+      });
+
+      if (!summaryResponse.ok) {
+        skipped.push({ title, reason: "Article summary unavailable.", http_status: summaryResponse.status });
+        continue;
+      }
+
+      const summary = await summaryResponse.json();
+      const content = [
+        "Title: " + String(summary.title || title),
+        summary.description ? "Description: " + String(summary.description) : "",
+        "Retrieved summary: " + String(summary.extract || "")
+      ].filter(Boolean).join("\n").slice(0, 20000);
+
+      if (!summary.extract || !content.trim()) {
+        skipped.push({ title, reason: "No readable article summary." });
+        continue;
+      }
+
+      const inserted = await db.prepare(`
+        INSERT INTO research_sources
+          (research_id, source_url, source_host, content_type, content, status)
+        VALUES (?, ?, 'en.wikipedia.org', 'application/json', ?, 'unverified')
+      `).bind(researchId, articleUrl, content).run();
+
+      saved.push({
+        source_id: inserted.meta?.last_row_id || null,
+        title: String(summary.title || title),
+        source_url: articleUrl,
+        source_status: "unverified",
+        characters_saved: content.length
+      });
+
+      if (saved.length >= 3) break;
+    }
+
+    if (saved.length) {
+      await db.prepare(`
+        UPDATE research
+        SET status = CASE
+          WHEN status IN ('planned', 'new') THEN 'source_collected'
+          ELSE status
+        END
+        WHERE id = ?
+      `).bind(researchId).run();
+    }
+
+    return json({
+      status: "Research source discovery completed.",
+      research_id: researchId,
+      search_term: searchTerm,
+      provider: "Wikipedia search and article summaries",
+      candidates_found: candidates.length,
+      sources_saved: saved.length,
+      saved,
+      skipped,
+      rule: "Discovered summaries are unverified starting points, not established facts. Seek independent sources before drawing conclusions."
+    });
+  } catch (error) {
+    return json({
+      status: "Research discovery failed.",
+      research_id: researchId,
+      error: String(error?.message || error)
+    }, 502);
+  }
+}
+
+async function handleAutonomousResearchDiscovery(db) {
+  const pending = await db.prepare(`
+    SELECT r.id
+    FROM research r
+    WHERE r.research_kind = 'self_directed'
+      AND r.status IN ('planned', 'new', 'source_collected')
+      AND NOT EXISTS (
+        SELECT 1 FROM research_sources s WHERE s.research_id = r.id
+      )
+    ORDER BY r.id ASC
+    LIMIT 1
+  `).first();
+
+  if (!pending) {
+    return {
+      status: "No self-directed research question needs initial source discovery.",
+      sources_saved: 0
+    };
+  }
+
+  const response = await handleResearchDiscover(
+    db,
+    new URL("https://aren-home.workers.dev/research-discover?research_id=" + pending.id)
+  );
+  const result = await response.json();
+  return {
+    ...result,
+    triggered_by: "scheduled_autonomous_cycle"
+  };
+}
+
 async function handleResearchSources(db, url) {
   const researchId = Number(url.searchParams.get("research_id") || 0);
   if (!researchId) return textResponse("Missing research_id", 400);
@@ -3384,6 +3556,10 @@ export default {
           db,
           url
         );
+      }
+
+      if (path === "/research-discover") {
+        return await handleResearchDiscover(db, url);
       }
 
       if (path === "/research-url") {
