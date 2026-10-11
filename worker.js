@@ -3524,7 +3524,11 @@ export default {
         );
       }
 
-      if (path === "/research-discover") {\n        return await handleResearchDiscover(db, url);\n      }\n\n      if (path === "/research-url") {
+      if (path === "/research-discover") {
+        return await handleResearchDiscover(db, url);
+      }
+
+      if (path === "/research-url") {
         return await handleResearchUrl(
           db,
           url
