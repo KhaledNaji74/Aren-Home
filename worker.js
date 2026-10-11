@@ -320,6 +320,20 @@ async function ensureTables(db) {
   `).run();
 
   await db.prepare(`
+    CREATE TABLE IF NOT EXISTS research_sources (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      research_id INTEGER NOT NULL,
+      source_url TEXT NOT NULL,
+      source_host TEXT NOT NULL,
+      content_type TEXT,
+      content TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'unverified',
+      fetched_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(research_id, source_url)
+    )
+  `).run();
+
+  await db.prepare(`
     CREATE TABLE IF NOT EXISTS lesson_challenges (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       lesson_id INTEGER NOT NULL,
@@ -797,8 +811,7 @@ async function handleAutolearn(db) {
         "reviewed judgment",
         "created_new_lesson",
         lessonId,
-        "Evidence from a reviewed judgment was preserved as experience.",
-        `Created lesson ${lessonId}`
+        "Evidence from a reviewed judgment was preserved as experience.",        `Created lesson ${lessonId}`
       ).run();
 
       results.push({
@@ -1597,8 +1610,7 @@ async function executeTestLesson(db, task) {
       }
 
       if (judgment.assessment === "challenge") {
-        challengesAdded++;
-      }
+        challengesAdded++;      }
 
       await db.prepare(`
         INSERT OR IGNORE INTO development_test_links
@@ -2397,8 +2409,7 @@ async function handleResearch(db, url) {
 
 async function handleResearchClaim(db, url) {
   const researchId = Number(
-    url.searchParams.get("research_id")
-  );
+    url.searchParams.get("research_id")  );
 
   const claim = cleanText(
     url.searchParams.get("claim")
@@ -2745,6 +2756,17 @@ async function handleResearchUrl(db, url) {
   const rawTarget = cleanText(url.searchParams.get("url"));
   if (!rawTarget) return textResponse("Missing url", 400);
 
+  const researchId = Number(url.searchParams.get("research_id") || 0);
+  let targetResearch = null;
+  if (researchId) {
+    targetResearch = await db.prepare(
+      "SELECT id, question, status FROM research WHERE id = ?"
+    ).bind(researchId).first();
+    if (!targetResearch) {
+      return json({ status: "Research not found.", research_id: researchId }, 404);
+    }
+  }
+
   const checked = validateResearchTarget(rawTarget);
   if (!checked.ok) return json({ status: "Research source rejected.", reason: checked.reason }, 400);
   const target = checked.url;
@@ -2790,6 +2812,61 @@ async function handleResearchUrl(db, url) {
     const content = readableResearchText(rawBody, contentType).slice(0, 20000);
     if (!content) return json({ status: "Research source failed.", reason: "No readable text found." }, 422);
 
+    if (researchId) {
+      const existing = await db.prepare(`
+        SELECT id, status
+        FROM research_sources
+        WHERE research_id = ? AND source_url = ?
+        LIMIT 1
+      `).bind(researchId, target.toString()).first();
+
+      if (existing) {
+        return json({
+          status: "Source already attached to this research question.",
+          research_id: researchId,
+          source_id: existing.id,
+          source: target.toString(),
+          source_status: existing.status,
+          duplicate: true,
+          note: "No duplicate source was saved."
+        });
+      }
+
+      const saved = await db.prepare(`
+        INSERT INTO research_sources
+          (research_id, source_url, source_host, content_type, content, status)
+        VALUES (?, ?, ?, ?, ?, 'unverified')
+      `).bind(
+        researchId,
+        target.toString(),
+        target.hostname.toLowerCase(),
+        contentType,
+        content
+      ).run();
+
+      await db.prepare(`
+        UPDATE research
+        SET status = CASE
+          WHEN status IN ('planned', 'new') THEN 'source_collected'
+          ELSE status
+        END
+        WHERE id = ?
+      `).bind(researchId).run();
+
+      return json({
+        status: "Source attached to research question.",
+        research_id: researchId,
+        source_id: saved.meta?.last_row_id || null,
+        source: target.toString(),
+        source_host: target.hostname.toLowerCase(),
+        source_status: "unverified",
+        content_type: contentType,
+        characters_saved: content.length,
+        duplicate: false,
+        note: "Retrieved text is unverified. It has not been fact-checked and does not change a lesson or principle."
+      });
+    }
+
     const result = await db.prepare(`
       INSERT INTO research (question, source, answer, status)
       VALUES (?, ?, ?, 'source_saved')
@@ -2809,6 +2886,34 @@ async function handleResearchUrl(db, url) {
   }
 }
 
+async function handleResearchSources(db, url) {
+  const researchId = Number(url.searchParams.get("research_id") || 0);
+  if (!researchId) return textResponse("Missing research_id", 400);
+
+  const research = await db.prepare(
+    "SELECT id, question, status FROM research WHERE id = ?"
+  ).bind(researchId).first();
+  if (!research) return json({ status: "Research not found.", research_id: researchId }, 404);
+
+  const result = await db.prepare(`
+    SELECT id, research_id, source_url, source_host, content_type,
+           status, fetched_at, length(content) AS characters_saved
+    FROM research_sources
+    WHERE research_id = ?
+    ORDER BY id ASC
+  `).bind(researchId).all();
+
+  const sources = result.results || [];
+  return json({
+    status: "Research sources retrieved.",
+    research,
+    source_count: sources.length,
+    unverified_count: sources.filter(source => source.status === "unverified").length,
+    sources,
+    rule: "Collected source text is not verified fact. Compare independent sources before drawing conclusions."
+  });
+}
+
 async function handleHealth(db) {
   const requiredTables = [
     "memories",
@@ -2822,6 +2927,7 @@ async function handleHealth(db) {
     "research_claims",
     "research_conclusions",
     "research_evidence",
+    "research_sources",
     "schema_migrations"
   ];
 
@@ -3287,6 +3393,13 @@ export default {
         );
       }
 
+      if (path === "/research-sources") {
+        return await handleResearchSources(
+          db,
+          url
+        );
+      }
+
       return textResponse(
         "Not found",
         404
@@ -3311,5 +3424,4 @@ export default {
     }
   }
 };
-
 
