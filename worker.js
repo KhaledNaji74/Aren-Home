@@ -198,7 +198,6 @@ async function ensureTables(db) {
       maturity TEXT DEFAULT 'new'
     )
   `).run();
-
   await db.prepare(`
     CREATE TABLE IF NOT EXISTS judgments (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -811,7 +810,8 @@ async function handleAutolearn(db) {
         "reviewed judgment",
         "created_new_lesson",
         lessonId,
-        "Evidence from a reviewed judgment was preserved as experience.",        `Created lesson ${lessonId}`
+        "Evidence from a reviewed judgment was preserved as experience.",
+        `Created lesson ${lessonId}`
       ).run();
 
       results.push({
@@ -1610,7 +1610,8 @@ async function executeTestLesson(db, task) {
       }
 
       if (judgment.assessment === "challenge") {
-        challengesAdded++;      }
+        challengesAdded++;
+      }
 
       await db.prepare(`
         INSERT OR IGNORE INTO development_test_links
@@ -2210,7 +2211,6 @@ async function handleRemember(db, url) {
     type,
     importance
   );
-
   return json({
     status: "Memory saved",
     id,
@@ -2409,7 +2409,8 @@ async function handleResearch(db, url) {
 
 async function handleResearchClaim(db, url) {
   const researchId = Number(
-    url.searchParams.get("research_id")  );
+    url.searchParams.get("research_id")
+  );
 
   const claim = cleanText(
     url.searchParams.get("claim")
@@ -2609,7 +2610,6 @@ async function handleResearchEvidence(db, url) {
       maturity,
       lessonId
     ).run();
-
     await db.prepare(`
       INSERT INTO memory_history
         (memory_id, event, details, created)
