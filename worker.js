@@ -2970,8 +2970,12 @@ async function handleResearchDiscover(db, url) {
   }
   if (/decision|judgment|consequence|outcome/i.test(searchTerm)) {
     searchTerms.push("decision making learning from outcomes");
+    searchTerms.push("decision-making consequences outcomes evaluation");
+    searchTerms.push("decision analysis outcome evaluation");
   }
-  const uniqueSearchTerms = [...new Set(searchTerms)].slice(0, 3);
+  // Keep targeted searches ahead of the broad question so discovery is less dominated
+  // by unrelated results returned for the original phrasing.
+  const uniqueSearchTerms = [...new Set(searchTerms)].slice(0, 5);
 
   try {
     const candidateMap = new Map();
@@ -2986,7 +2990,7 @@ async function handleResearchDiscover(db, url) {
         srsearch: term,
         format: "json",
         utf8: "1",
-        srlimit: "5"
+        srlimit: "8"
       }).toString();
 
       const response = await fetch(searchUrl.toString(), {
@@ -3098,8 +3102,12 @@ async function handleResearchDiscover(db, url) {
         contentLabel + ": " + extract
       ].filter(Boolean).join("\n").slice(0, 20000);
 
-      const score = relevanceScore("Title: " + title + "\n" + content);
-      if (!relevantEnough(content)) {
+      const scoredText = "Title: " + title + "\n" + content;
+      const score = relevanceScore(scoredText);
+      const normalizedTitle = normalize(title);
+      const titleMatchesDecisionTopic =
+        /\b(decision|decisions|decision making|judgment|judgement|consequence|consequences|outcome|outcomes)\b/.test(normalizedTitle);
+      if (!relevantEnough(scoredText) && !titleMatchesDecisionTopic) {
         skipped.push({
           title,
           reason: "Rejected by the initial relevance filter.",
