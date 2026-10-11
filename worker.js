@@ -2050,6 +2050,8 @@ async function handleAutonomousCycle(db) {
   const researchResponse = await handleSelfDirectedResearch(db);
   const selfDirectedResearch = await researchResponse.json();
 
+  const researchDiscovery = await handleAutonomousResearchDiscovery(db);
+
   const developmentResponse = await handleExecuteDevelopment(db);
   const development = await developmentResponse.json();
 
@@ -2058,6 +2060,7 @@ async function handleAutonomousCycle(db) {
     learning,
     lesson_evaluation: lessonEvaluation,
     self_directed_research: selfDirectedResearch,
+    research_discovery: researchDiscovery,
     development
   };
 
@@ -3022,6 +3025,37 @@ async function handleResearchDiscover(db, url) {
       error: String(error?.message || error)
     }, 502);
   }
+}
+
+async function handleAutonomousResearchDiscovery(db) {
+  const pending = await db.prepare(`
+    SELECT r.id
+    FROM research r
+    WHERE r.research_kind = 'self_directed'
+      AND r.status IN ('planned', 'new', 'source_collected')
+      AND NOT EXISTS (
+        SELECT 1 FROM research_sources s WHERE s.research_id = r.id
+      )
+    ORDER BY r.id ASC
+    LIMIT 1
+  `).first();
+
+  if (!pending) {
+    return {
+      status: "No self-directed research question needs initial source discovery.",
+      sources_saved: 0
+    };
+  }
+
+  const response = await handleResearchDiscover(
+    db,
+    new URL("https://aren-home.workers.dev/research-discover?research_id=" + pending.id)
+  );
+  const result = await response.json();
+  return {
+    ...result,
+    triggered_by: "scheduled_autonomous_cycle"
+  };
 }
 
 async function handleResearchSources(db, url) {
