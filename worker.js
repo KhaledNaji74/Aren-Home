@@ -247,6 +247,27 @@ async function ensureTables(db) {
     )
   `).run();
 
+  // Upgrade older existing research tables without deleting stored research.
+  const researchColumnsResult = await db.prepare("PRAGMA table_info(research)").all();
+  const researchColumns = new Set((researchColumnsResult.results || []).map(column => column.name));
+  const researchColumnUpgrades = [
+    ["question", "TEXT"],
+    ["source", "TEXT"],
+    ["answer", "TEXT"],
+    ["status", "TEXT DEFAULT 'new'"],
+    ["created", "DATETIME"]
+  ];
+  for (const [columnName, columnType] of researchColumnUpgrades) {
+    if (!researchColumns.has(columnName)) {
+      try {
+        await db.prepare(`ALTER TABLE research ADD COLUMN ${columnName} ${columnType}`).run();
+      } catch (error) {
+        // A concurrent request may have added this column after the PRAGMA check.
+        if (!String(error?.message || error).toLowerCase().includes("duplicate column")) throw error;
+      }
+    }
+  }
+
   await db.prepare(`
     CREATE TABLE IF NOT EXISTS research_claims (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
