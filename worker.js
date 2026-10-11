@@ -2958,7 +2958,9 @@ async function handleResearchDiscover(db, url) {
 
   const relevantEnough = content => {
     const score = relevanceScore(content);
-    return score.exactHits >= 1 || score.groupHits >= 2;
+    // A single incidental keyword is not enough to accept a source.
+    // Require multiple distinct topic terms or matches across multiple concept groups.
+    return score.exactHits >= 2 || score.groupHits >= 2;
   };
 
   const searchTerms = [searchTerm];
@@ -3104,10 +3106,7 @@ async function handleResearchDiscover(db, url) {
 
       const scoredText = "Title: " + title + "\n" + content;
       const score = relevanceScore(scoredText);
-      const normalizedTitle = normalize(title);
-      const titleMatchesDecisionTopic =
-        /\b(decision|decisions|decision making|judgment|judgement|consequence|consequences|outcome|outcomes)\b/.test(normalizedTitle);
-      if (!relevantEnough(scoredText) && !titleMatchesDecisionTopic) {
+      if (!relevantEnough(scoredText)) {
         skipped.push({
           title,
           reason: "Rejected by the initial relevance filter.",
