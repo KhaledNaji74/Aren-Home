@@ -2903,8 +2903,9 @@ async function handleResearchDiscover(db, url) {
     return json({ status: "Research not found.", research_id: researchId }, 404);
   }
 
-  const quoted = String(research.question || "").match(/"([^"]{3,300})"/);
-  const searchTerm = (quoted ? quoted[1] : String(research.question || ""))
+  const question = String(research.question || "");
+  const quoted = question.match(/"([^"]{3,300})"/);
+  const searchTerm = (quoted ? quoted[1] : question)
     .replace(/^(what reliable evidence supports or challenges this untested lesson:|what reliable evidence supports or challenges this lesson:|compare the supporting and challenging reviewed experiences for this lesson:)/i, "")
     .replace(/\s+/g, " ")
     .trim()
@@ -2914,32 +2915,104 @@ async function handleResearchDiscover(db, url) {
     return json({ status: "No usable research terms found.", research_id: researchId }, 422);
   }
 
-  try {
-    const searchUrl = new URL("https://en.wikipedia.org/w/api.php");
-    searchUrl.search = new URLSearchParams({
-      action: "query",
-      list: "search",
-      srsearch: searchTerm,
-      format: "json",
-      utf8: "1",
-      srlimit: "5"
-    }).toString();
+  const normalize = value => String(value || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9\s-]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 
-    const searchResponse = await fetch(searchUrl.toString(), {
-      headers: { "accept": "application/json", "user-agent": "Aren-Home/1.0 (research source discovery)" },
-      signal: AbortSignal.timeout(10000)
-    });
+  const stopWords = new Set([
+    "aren", "should", "could", "would", "this", "that", "with", "from",
+    "what", "which", "when", "where", "does", "have", "has", "been",
+    "into", "about", "their", "there", "these", "those", "reliable",
+    "evidence", "supports", "support", "challenges", "challenge", "untested",
+    "lesson", "lessons", "for", "and", "the", "are", "its", "own"
+  ]);
 
-    if (!searchResponse.ok) {
-      return json({ status: "Research discovery failed.", http_status: searchResponse.status }, 502);
+  const topicTerms = normalize(searchTerm).split(" ")
+    .filter(word => word.length > 2 && !stopWords.has(word));
+
+  const termGroups = [
+    ["learn", "learning", "learned", "lesson", "lessons", "experience", "experiences", "experiential", "feedback", "reflection", "practice"],
+    ["memory", "memories", "remember", "retention", "retain", "preserve", "preservation", "recall", "knowledge"],
+    ["decision", "decisions", "judgment", "judgement", "consequence", "consequences", "outcome", "outcomes"],
+    ["review", "reviewed", "assessment", "improvement", "evidence"]
+  ];
+
+  const relevanceScore = content => {
+    const text = normalize(content);
+    const words = new Set(text.split(" "));
+    let exactHits = 0;
+    for (const term of topicTerms) {
+      if (words.has(term) || (term.length > 4 && text.includes(term))) exactHits++;
     }
+    const groupHits = termGroups.filter(group =>
+      group.some(term => words.has(term))
+    ).length;
+    return { exactHits, groupHits };
+  };
 
-    const searchData = await searchResponse.json();
-    const candidates = (searchData?.query?.search || []).slice(0, 5);
+  const relevantEnough = content => {
+    const score = relevanceScore(content);
+    return score.exactHits >= 1 || score.groupHits >= 2;
+  };
+
+  const searchTerms = [searchTerm];
+  if (/lesson|learn|experience|review/i.test(searchTerm)) {
+    searchTerms.push("learning from experience");
+  }
+  if (/preserv|retain|memory|remember/i.test(searchTerm)) {
+    searchTerms.push("memory retention learning");
+  }
+  if (/decision|judgment|consequence|outcome/i.test(searchTerm)) {
+    searchTerms.push("decision making learning from outcomes");
+  }
+  const uniqueSearchTerms = [...new Set(searchTerms)].slice(0, 3);
+
+  try {
+    const candidateMap = new Map();
     const saved = [];
     const skipped = [];
 
+    for (const term of uniqueSearchTerms) {
+      const searchUrl = new URL("https://en.wikipedia.org/w/api.php");
+      searchUrl.search = new URLSearchParams({
+        action: "query",
+        list: "search",
+        srsearch: term,
+        format: "json",
+        utf8: "1",
+        srlimit: "5"
+      }).toString();
+
+      const response = await fetch(searchUrl.toString(), {
+        headers: {
+          "accept": "application/json",
+          "user-agent": "Aren-Home/1.0 (research source discovery)"
+        },
+        signal: AbortSignal.timeout(10000)
+      });
+
+      if (!response.ok) {
+        skipped.push({
+          search_term: term,
+          reason: "Search provider unavailable.",
+          http_status: response.status
+        });
+        continue;
+      }
+
+      const data = await response.json();
+      for (const candidate of data?.query?.search || []) {
+        const title = String(candidate.title || "").trim();
+        if (title && !candidateMap.has(title)) candidateMap.set(title, candidate);
+      }
+    }
+
+    const candidates = [...candidateMap.values()].slice(0, 12);
+
     for (const candidate of candidates) {
+      if (saved.length >= 3) break;
       const title = String(candidate.title || "").trim();
       if (!title) continue;
 
@@ -2958,65 +3031,72 @@ async function handleResearchDiscover(db, url) {
       const summaryUrl = "https://en.wikipedia.org/api/rest_v1/page/summary/" +
         encodeURIComponent(title.replace(/ /g, "_"));
       const summaryResponse = await fetch(summaryUrl, {
-        headers: { "accept": "application/json", "user-agent": "Aren-Home/1.0 (research source discovery)" },
+        headers: {
+          "accept": "application/json",
+          "user-agent": "Aren-Home/1.0 (research source discovery)"
+        },
         signal: AbortSignal.timeout(10000)
       });
 
       if (!summaryResponse.ok) {
-        skipped.push({ title, reason: "Article summary unavailable.", http_status: summaryResponse.status });
+        skipped.push({ title, reason: "Article summary unavailable." });
         continue;
       }
 
       const summary = await summaryResponse.json();
-      const content = [
-        "Title: " + String(summary.title || title),
-        summary.description ? "Description: " + String(summary.description) : "",
-        "Retrieved summary: " + String(summary.extract || "")
-      ].filter(Boolean).join("\n").slice(0, 20000);
-
-      if (!summary.extract || !content.trim()) {
+      const extract = String(summary.extract || "");
+      if (!extract.trim()) {
         skipped.push({ title, reason: "No readable article summary." });
         continue;
       }
 
-      const inserted = await db.prepare(`
-        INSERT INTO research_sources
-          (research_id, source_url, source_host, content_type, content, status)
-        VALUES (?, ?, 'en.wikipedia.org', 'application/json', ?, 'unverified')
-      `).bind(researchId, articleUrl, content).run();
+      const content = [
+        "Title: " + String(summary.title || title),
+        summary.description ? "Description: " + String(summary.description) : "",
+        "Retrieved summary: " + extract
+      ].filter(Boolean).join("\n").slice(0, 20000);
+
+      const score = relevanceScore(content);
+      if (!relevantEnough(content)) {
+        skipped.push({
+          title,
+          reason: "Rejected by the initial relevance filter.",
+          relevance_score: score
+        });
+        continue;
+      }
+
+      const inserted = await db.prepare(
+        "INSERT INTO research_sources (research_id, source_url, source_host, content_type, content, status) VALUES (?, ?, 'en.wikipedia.org', 'application/json', ?, 'unverified')"
+      ).bind(researchId, articleUrl, content).run();
 
       saved.push({
         source_id: inserted.meta?.last_row_id || null,
         title: String(summary.title || title),
         source_url: articleUrl,
         source_status: "unverified",
+        relevance_score: score,
         characters_saved: content.length
       });
-
-      if (saved.length >= 3) break;
     }
 
     if (saved.length) {
-      await db.prepare(`
-        UPDATE research
-        SET status = CASE
-          WHEN status IN ('planned', 'new') THEN 'source_collected'
-          ELSE status
-        END
-        WHERE id = ?
-      `).bind(researchId).run();
+      await db.prepare(
+        "UPDATE research SET status = CASE WHEN status IN ('planned', 'new') THEN 'source_collected' ELSE status END WHERE id = ?"
+      ).bind(researchId).run();
     }
 
     return json({
       status: "Research source discovery completed.",
       research_id: researchId,
       search_term: searchTerm,
+      search_variants: uniqueSearchTerms,
       provider: "Wikipedia search and article summaries",
       candidates_found: candidates.length,
       sources_saved: saved.length,
       saved,
       skipped,
-      rule: "Discovered summaries are unverified starting points, not established facts. Seek independent sources before drawing conclusions."
+      rule: "The relevance filter is preliminary. Sources remain unverified and must not be treated as established facts."
     });
   } catch (error) {
     return json({
