@@ -268,6 +268,21 @@ async function ensureTables(db) {
     }
   }
 
+  // Additive fields let Aren link its own research plans to a lesson.
+  const researchPlanningUpgrades = [
+    ["target_memory_id", "INTEGER"],
+    ["research_kind", "TEXT DEFAULT 'manual'"]
+  ];
+  for (const [columnName, columnType] of researchPlanningUpgrades) {
+    if (!researchColumns.has(columnName)) {
+      try {
+        await db.prepare(`ALTER TABLE research ADD COLUMN ${columnName} ${columnType}`).run();
+      } catch (error) {
+        if (!String(error?.message || error).toLowerCase().includes("duplicate column")) throw error;
+      }
+    }
+  }
+
   await db.prepare(`
     CREATE TABLE IF NOT EXISTS research_claims (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1922,6 +1937,94 @@ async function handleExecuteDevelopment(db) {
   Principles are protected: this cycle can create lessons and
   principle candidates, but it never changes an existing principle.
 */
+
+/*
+  SELF-DIRECTED RESEARCH PLANNER
+
+  Creates a persistent research question when a lesson is untested,
+  challenged, or has mixed evidence. It plans questions only; it does
+  not invent findings, treat fetched text as verified, or alter principles.
+*/
+async function handleSelfDirectedResearch(db) {
+  const lessons = (await getMemories(db)).filter(memory =>
+    memory.type === "lesson" &&
+    (
+      Number(memory.evidence_count || 0) === 0 ||
+      Number(memory.challenged_count || 0) > 0
+    )
+  );
+
+  const planned = [];
+  const skipped = [];
+
+  for (const lesson of lessons) {
+    const existing = await db.prepare(`
+      SELECT id, status
+      FROM research
+      WHERE target_memory_id = ?
+      ORDER BY id DESC
+      LIMIT 1
+    `).bind(lesson.id).first();
+
+    if (existing) {
+      skipped.push({
+        lesson_id: lesson.id,
+        research_id: existing.id,
+        reason: "A research question is already recorded for this lesson."
+      });
+      continue;
+    }
+
+    const evidenceCount = Number(lesson.evidence_count || 0);
+    const challengedCount = Number(lesson.challenged_count || 0);
+    let question;
+
+    if (evidenceCount > 0 && challengedCount > 0) {
+      question = `Compare the supporting and challenging reviewed experiences for this lesson: "${lesson.text}". Identify the conditions that may explain the different outcomes.`;
+    } else if (challengedCount > 0) {
+      question = `What reliable evidence supports or challenges this lesson: "${lesson.text}"? Examine the conditions and limits of the lesson.`;
+    } else {
+      question = `What reliable evidence supports or challenges this untested lesson: "${lesson.text}"?`;
+    }
+
+    const inserted = await db.prepare(`
+      INSERT INTO research (question, status, target_memory_id, research_kind)
+      VALUES (?, 'planned', ?, 'self_directed')
+    `).bind(question, lesson.id).run();
+
+    const researchId = inserted.meta?.last_row_id || null;
+    planned.push({
+      research_id: researchId,
+      lesson_id: lesson.id,
+      question,
+      status: "planned",
+      note: "Question generated from stored knowledge. Sources and findings still require evaluation."
+    });
+  }
+
+  const cycle = await db.prepare(`
+    INSERT INTO development_cycles
+      (trigger, action, reason, result, status)
+    VALUES (?, ?, ?, ?, ?)
+  `).bind(
+    "self_evaluation",
+    "plan_self_directed_research",
+    "Aren identified untested or challenged lessons that need more evidence.",
+    JSON.stringify({ planned, skipped }),
+    "completed"
+  ).run();
+
+  return json({
+    status: "Self-directed research planning completed.",
+    cycle_id: cycle.meta?.last_row_id || null,
+    lessons_considered: lessons.length,
+    questions_created: planned.length,
+    planned,
+    skipped,
+    rule: "Planning a question does not establish a fact or change a principle."
+  });
+}
+
 async function handleAutonomousCycle(db) {
   const cycleStarted = new Date().toISOString();
 
@@ -1931,6 +2034,9 @@ async function handleAutonomousCycle(db) {
   const lessonResponse = await handleEvaluateLessons(db);
   const lessonEvaluation = await lessonResponse.json();
 
+  const researchResponse = await handleSelfDirectedResearch(db);
+  const selfDirectedResearch = await researchResponse.json();
+
   const developmentResponse = await handleExecuteDevelopment(db);
   const development = await developmentResponse.json();
 
@@ -1938,6 +2044,7 @@ async function handleAutonomousCycle(db) {
     cycle_started: cycleStarted,
     learning,
     lesson_evaluation: lessonEvaluation,
+    self_directed_research: selfDirectedResearch,
     development
   };
 
@@ -2844,6 +2951,7 @@ function homepage() {
   <a href="/principle-candidates">Principle Candidates</a>
   <a href="/judgments">Judgments</a>
   <a href="/research-history">Research</a>
+  <a href="/self-directed-research">Self-Directed Research</a>
   <a href="/memory-test">Memory Test</a>
 </body>
 </html>`;
@@ -3125,6 +3233,10 @@ export default {
         return await handleExecuteDevelopment(
           db
         );
+      }
+
+      if (path === "/self-directed-research") {
+        return await handleSelfDirectedResearch(db);
       }
 
       if (path === "/research") {
