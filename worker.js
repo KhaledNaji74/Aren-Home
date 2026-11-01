@@ -3030,27 +3030,39 @@ async function handleResearchDiscover(db, url) {
         continue;
       }
 
+      // Try the REST summary first, but do not discard a candidate if that
+      // endpoint is unavailable. The Action API is the independent fallback.
+      let summary = null;
+      let extract = "";
+      let contentLabel = "";
+      let summaryFailure = null;
+
       const summaryUrl = "https://en.wikipedia.org/api/rest_v1/page/summary/" +
         encodeURIComponent(title.replace(/ /g, "_"));
-      const summaryResponse = await fetch(summaryUrl, {
-        headers: {
-          "accept": "application/json",
-          "user-agent": "Aren-Home/1.0 (research source discovery)"
-        },
-        signal: AbortSignal.timeout(10000)
-      });
-
-      if (!summaryResponse.ok) {
-        skipped.push({ title, reason: "Article summary unavailable." });
-        continue;
+      try {
+        const summaryResponse = await fetch(summaryUrl, {
+          headers: {
+            "accept": "application/json",
+            "user-agent": "Aren-Home/1.0 (research source discovery)"
+          },
+          signal: AbortSignal.timeout(10000)
+        });
+        if (summaryResponse.ok) {
+          summary = await summaryResponse.json();
+          extract = String(summary.extract || "").trim();
+          if (extract) contentLabel = "Retrieved summary";
+        } else {
+          summaryFailure = "REST summary HTTP " + summaryResponse.status;
+        }
+      } catch (error) {
+        summaryFailure = String(error?.message || error);
       }
 
-      const summary = await summaryResponse.json();
-      let extract = String(summary.extract || "");
-      let contentLabel = "Retrieved summary";
-
-      // Short summaries are too thin for research review. Try a fuller plain-text extract.
+      // Use the fuller Action API extract when the summary is missing or too short.
+      // This also recovers candidates whose REST summary endpoint returns an error.
+      let fallbackAttempted = false;
       if (extract.length < 1000) {
+        fallbackAttempted = true;
         try {
           const fullUrl = new URL("https://en.wikipedia.org/w/api.php");
           fullUrl.search = new URLSearchParams({
@@ -3077,26 +3089,31 @@ async function handleResearchDiscover(db, url) {
             const fullExtract = String(page?.extract || "").trim();
             if (fullExtract.length > extract.length) {
               extract = fullExtract;
-              contentLabel = "Retrieved article extract";
+              contentLabel = "Retrieved article extract (Action API fallback)";
             }
           }
         } catch (_) {
-          // Keep the available summary; it remains unverified.
+          // A failed fallback does not invalidate an available REST summary.
         }
       }
 
       if (!extract.trim()) {
-        skipped.push({ title, reason: "No readable article summary or extract." });
+        skipped.push({
+          title,
+          reason: "No readable summary or article extract from either Wikipedia endpoint.",
+          summary_error: summaryFailure,
+          fallback_attempted: fallbackAttempted
+        });
         continue;
       }
 
       const content = [
-        "Title: " + String(summary.title || title),
-        summary.description ? "Description: " + summary.description : "",
+        "Title: " + String(summary?.title || title),
+        summary?.description ? "Description: " + summary.description : "",
         contentLabel + ": " + extract
       ].filter(Boolean).join("\n").slice(0, 20000);
 
-      const relevanceBody = [summary.description || "", contentLabel + ": " + extract].filter(Boolean).join("\n");
+      const relevanceBody = [summary?.description || "", contentLabel + ": " + extract].filter(Boolean).join("\n");
       const score = relevanceScore(title, relevanceBody);
       const titleMatchesTopic = score.title_matches.length > 0;
       const bodyMatchesTopic = score.body_matches.length > 0;
