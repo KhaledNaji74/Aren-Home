@@ -3159,9 +3159,11 @@ async function handleResearchDiscover(db, url) {
     if (saved.length < 3) {
       alternativeProvider.attempted = true;
       try {
+        const openAlexSearchTerm = uniqueSearchTerms.find(term => term !== searchTerm) || searchTerm;
+        alternativeProvider.search_term = openAlexSearchTerm;
         const openAlexUrl = new URL("https://api.openalex.org/works");
         openAlexUrl.search = new URLSearchParams({
-          search: searchTerm,
+          search: openAlexSearchTerm,
           "per-page": "12",
           select: "id,doi,title,publication_year,authorships,abstract_inverted_index,type",
           sort: "relevance_score:desc"
