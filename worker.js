@@ -3096,7 +3096,8 @@ async function handleResearchDiscover(db, url) {
         contentLabel + ": " + extract
       ].filter(Boolean).join("\n").slice(0, 20000);
 
-      const score = relevanceScore(title, content);
+      const relevanceBody = [summary.description || "", contentLabel + ": " + extract].filter(Boolean).join("\n");
+      const score = relevanceScore(title, relevanceBody);
       const titleMatchesTopic = score.title_matches.length > 0;
       const bodyMatchesTopic = score.body_matches.length > 0;
       // Accept a source only when its title identifies the topic and its body
