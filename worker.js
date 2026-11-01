@@ -3307,7 +3307,7 @@ async function handleResearchDiscover(db, url) {
             } else if (abstract && typeof abstract === "object") {
               abstract = String(abstract.$ || "");
             }
-            abstract = String(abstract || "").replace(/<[^>]*>/g, " ").replace(/\\s+/g, " ").trim();
+            abstract = String(abstract || "").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
             if (!title || abstract.length < 120) continue;
 
             const score = relevanceScore(title, abstract);
