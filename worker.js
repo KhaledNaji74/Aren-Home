@@ -2934,8 +2934,10 @@ async function handleResearchDiscover(db, url) {
       ]
     : [
         { name: "learning-from-experience", patterns: [/\blearning from experience\b/, /\blearning through experience\b/, /\bexperiential learning\b/, /\bexperience-based learning\b/, /\blessons learned\b/, /\breflective practice\b/, /\breflection on experience\b/] },
-        { name: "preservation-and-retention", patterns: [/\bknowledge retention\b/, /\bmemory retention\b/, /\borganizational memory\b/, /\binstitutional memory\b/, /\bknowledge management\b/, /\bpreserving knowledge\b/, /\bretention of knowledge\b/] },
-        { name: "review-and-improvement", patterns: [/\bafter action review\b/, /\bpostmortem analysis\b/, /\bcontinuous improvement\b/, /\breflective learning\b/, /\bexperience review\b/] }
+        { name: "preservation-and-retention", patterns: [/\bknowledge retention\b/, /\bmemory retention\b/, /\bmemory consolidation\b/, /\blong-term memory\b/, /\borganizational memory\b/, /\binstitutional memory\b/, /\bknowledge management\b/, /\bknowledge preservation\b/, /\bpreserving knowledge\b/, /\bretention of knowledge\b/] },
+        { name: "review-and-improvement", patterns: [/\bafter action review\b/, /\bpostmortem analysis\b/, /\bcontinuous improvement\b/, /\breflective learning\b/, /\bexperience review\b/, /\blessons learned process\b/] },
+        { name: "memory-and-retrieval", patterns: [/\bepisodic memory\b/, /\bautobiographical memory\b/, /\bmemory retrieval\b/, /\bretrieval practice\b/, /\bmemory recall\b/, /\brecall of past experience\b/] },
+        { name: "knowledge-capture-and-transfer", patterns: [/\bknowledge capture\b/, /\bknowledge transfer\b/, /\bknowledge sharing\b/, /\borganizational learning\b/, /\bexperience sharing\b/] }
       ];
 
   const matchedProfiles = content => {
@@ -3255,119 +3257,141 @@ async function handleResearchDiscover(db, url) {
       }
     }
 
-    // Europe PMC is a third, independent academic source when the first providers
-    // are unavailable or do not produce enough relevant sources.
+    // Search Europe PMC with focused Boolean combinations rather than one broad phrase.
     const europePmcProvider = {
       name: "Europe PMC",
       attempted: false,
       http_status: null,
       error: null,
+      queries_attempted: [],
       candidates_found: 0,
       sources_saved: 0
     };
     if (saved.length < 3) {
       europePmcProvider.attempted = true;
+      const europePmcQueries = isDecisionTopic
+        ? [
+            'TITLE_ABS:("decision making" OR "decision-making") AND TITLE_ABS:(outcome OR consequence OR feedback)',
+            'TITLE_ABS:("learning from mistakes" OR "decision feedback" OR "reflective practice") AND TITLE_ABS:(decision OR outcome)'
+          ]
+        : [
+            'TITLE_ABS:("experiential learning" OR "learning from experience") AND TITLE_ABS:("memory retention" OR "memory consolidation" OR "knowledge retention")',
+            'TITLE_ABS:("lessons learned" OR "reflective practice" OR "after action review") AND TITLE_ABS:("knowledge retention" OR "organizational memory" OR "knowledge management")',
+            'TITLE_ABS:("episodic memory" OR "autobiographical memory") AND TITLE_ABS:(learning OR experience OR "memory consolidation")',
+            'TITLE_ABS:("memory consolidation" OR "long-term memory") AND TITLE_ABS:(experience OR learning OR retrieval)'
+          ];
+      const europePmcWorks = new Map();
       try {
-        const europePmcSearchTerm =
-          uniqueSearchTerms.find(term => term !== searchTerm) || searchTerm;
-        europePmcProvider.search_term = europePmcSearchTerm;
-        const europePmcUrl = new URL(
-          "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
-        );
-        europePmcUrl.search = new URLSearchParams({
-          query: 'TITLE_ABS:"' + europePmcSearchTerm.replace(/["\\]/g, " ") + '"',
-          format: "json",
-          pageSize: "12",
-          resultType: "core"
-        }).toString();
-        const europePmcResponse = await fetch(europePmcUrl.toString(), {
-          headers: {
-            "accept": "application/json",
-            "user-agent": "Aren-Home/1.0 (research source discovery)"
-          },
-          signal: AbortSignal.timeout(12000)
-        });
-        europePmcProvider.http_status = europePmcResponse.status;
-        if (!europePmcResponse.ok) {
-          europePmcProvider.error = "Europe PMC HTTP " + europePmcResponse.status;
-        } else {
-          const europePmcData = await europePmcResponse.json();
-          const works = Array.isArray(europePmcData?.resultList?.result)
-            ? europePmcData.resultList.result
-            : [];
-          europePmcProvider.candidates_found = works.length;
-          for (const work of works) {
-            if (saved.length >= 3) break;
-            const title = String(work?.title || "").trim();
-            let abstract = work?.abstractText;
-            if (Array.isArray(abstract)) {
-              abstract = abstract.map(part =>
-                typeof part === "string" ? part : String(part?.$ || "")
-              ).join(" ");
-            } else if (abstract && typeof abstract === "object") {
-              abstract = String(abstract.$ || "");
-            }
-            abstract = String(abstract || "").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
-            if (!title || abstract.length < 120) continue;
-
-            const score = relevanceScore(title, abstract);
-            const relevant =
-              (score.title_matches.length > 0 && score.body_matches.length > 0) ||
-              score.body_matches.length >= 2;
-            if (!relevant) {
-              skipped.push({
-                title,
-                provider: "Europe PMC",
-                reason: "Rejected: insufficient topic coverage in title and abstract.",
-                relevance_score: score
-              });
-              continue;
-            }
-
-            const pmcid = String(work?.pmcid || "").trim();
-            const pmid = String(work?.pmid || "").trim();
-            const sourceUrl = pmcid
-              ? "https://europepmc.org/articles/" + encodeURIComponent(pmcid)
-              : pmid
-                ? "https://europepmc.org/article/MED/" + encodeURIComponent(pmid)
-                : "";
-            if (!sourceUrl) continue;
-            const existing = await db.prepare(
-              "SELECT id FROM research_sources WHERE research_id = ? AND source_url = ? LIMIT 1"
-            ).bind(researchId, sourceUrl).first();
-            if (existing) {
-              skipped.push({ title, provider: "Europe PMC", reason: "Already attached to this research question." });
-              continue;
-            }
-
-            const authors = Array.isArray(work.authorList?.author)
-              ? work.authorList.author.slice(0, 5).map(author =>
-                  [author?.firstName, author?.lastName].filter(Boolean).join(" ")
-                ).filter(Boolean)
-              : [];
-            const content = [
-              "Title: " + title,
-              work.firstPublicationDate ? "Publication date: " + work.firstPublicationDate : "",
-              authors.length ? "Authors: " + authors.join("; ") : "",
-              work.doi ? "DOI: " + work.doi : "",
-              "Abstract: " + abstract
-            ].filter(Boolean).join("\n").slice(0, 20000);
-            const inserted = await db.prepare(
-              "INSERT INTO research_sources (research_id, source_url, source_host, content_type, content, status) VALUES (?, ?, 'europepmc.org', 'application/json', ?, 'unverified')"
-            ).bind(researchId, sourceUrl, content).run();
-            saved.push({
-              source_id: inserted.meta?.last_row_id || null,
-              title,
-              source_url: sourceUrl,
-              doi: work.doi || null,
-              publication_date: work.firstPublicationDate || null,
-              provider: "Europe PMC",
-              source_status: "unverified",
-              relevance_score: score,
-              characters_saved: content.length
-            });
-            europePmcProvider.sources_saved++;
+        for (const query of europePmcQueries) {
+          const searchUrl = new URL("https://www.ebi.ac.uk/europepmc/webservices/rest/search");
+          searchUrl.search = new URLSearchParams({
+            query,
+            format: "json",
+            pageSize: "12",
+            resultType: "core"
+          }).toString();
+          const response = await fetch(searchUrl.toString(), {
+            headers: {
+              "accept": "application/json",
+              "user-agent": "Aren-Home/1.0 (research source discovery)"
+            },
+            signal: AbortSignal.timeout(12000)
+          });
+          europePmcProvider.queries_attempted.push({
+            query,
+            http_status: response.status
+          });
+          if (!response.ok) {
+            europePmcProvider.error = "One or more Europe PMC searches failed.";
+            continue;
           }
+          europePmcProvider.http_status = response.status;
+          const data = await response.json();
+          const works = Array.isArray(data?.resultList?.result)
+            ? data.resultList.result
+            : [];
+          for (const work of works) {
+            const key = String(work?.pmcid || work?.pmid || work?.doi || work?.id || work?.title || "");
+            if (key && !europePmcWorks.has(key)) europePmcWorks.set(key, work);
+          }
+        }
+        const works = [...europePmcWorks.values()];
+        europePmcProvider.candidates_found = works.length;
+        for (const work of works) {
+          if (saved.length >= 3) break;
+          const title = String(work?.title || "").trim();
+          let abstract = work?.abstractText;
+          if (Array.isArray(abstract)) {
+            abstract = abstract.map(part =>
+              typeof part === "string" ? part : String(part?.$ || "")
+            ).join(" ");
+          } else if (abstract && typeof abstract === "object") {
+            abstract = String(abstract.$ || "");
+          }
+          abstract = String(abstract || "").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+          if (!title || abstract.length < 120) continue;
+
+          const score = relevanceScore(title, abstract);
+          const distinctGroups = new Set([
+            ...score.title_matches,
+            ...score.body_matches
+          ]);
+          // A single phrase repeated in title and abstract is not enough.
+          const relevant = distinctGroups.size >= 2 &&
+            (score.title_matches.length > 0 || score.body_matches.length >= 2);
+          if (!relevant) {
+            skipped.push({
+              title,
+              provider: "Europe PMC",
+              reason: "Rejected: fewer than two independent topic dimensions in title and abstract.",
+              relevance_score: score
+            });
+            continue;
+          }
+
+          const pmcid = String(work?.pmcid || "").trim();
+          const pmid = String(work?.pmid || "").trim();
+          const sourceUrl = pmcid
+            ? "https://europepmc.org/articles/" + encodeURIComponent(pmcid)
+            : pmid
+              ? "https://europepmc.org/article/MED/" + encodeURIComponent(pmid)
+              : "";
+          if (!sourceUrl) continue;
+          const existing = await db.prepare(
+            "SELECT id FROM research_sources WHERE research_id = ? AND source_url = ? LIMIT 1"
+          ).bind(researchId, sourceUrl).first();
+          if (existing) {
+            skipped.push({ title, provider: "Europe PMC", reason: "Already attached to this research question." });
+            continue;
+          }
+
+          const authors = Array.isArray(work.authorList?.author)
+            ? work.authorList.author.slice(0, 5).map(author =>
+                [author?.firstName, author?.lastName].filter(Boolean).join(" ")
+              ).filter(Boolean)
+            : [];
+          const content = [
+            "Title: " + title,
+            work.firstPublicationDate ? "Publication date: " + work.firstPublicationDate : "",
+            authors.length ? "Authors: " + authors.join("; ") : "",
+            work.doi ? "DOI: " + work.doi : "",
+            "Abstract: " + abstract
+          ].filter(Boolean).join("\n").slice(0, 20000);
+          const inserted = await db.prepare(
+            "INSERT INTO research_sources (research_id, source_url, source_host, content_type, content, status) VALUES (?, ?, 'europepmc.org', 'application/json', ?, 'unverified')"
+          ).bind(researchId, sourceUrl, content).run();
+          saved.push({
+            source_id: inserted.meta?.last_row_id || null,
+            title,
+            source_url: sourceUrl,
+            doi: work.doi || null,
+            publication_date: work.firstPublicationDate || null,
+            provider: "Europe PMC",
+            source_status: "unverified",
+            relevance_score: score,
+            characters_saved: content.length
+          });
+          europePmcProvider.sources_saved++;
         }
       } catch (error) {
         europePmcProvider.error = String(error?.message || error);
