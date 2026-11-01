@@ -3351,7 +3351,7 @@ async function handleResearchDiscover(db, url) {
               authors.length ? "Authors: " + authors.join("; ") : "",
               work.doi ? "DOI: " + work.doi : "",
               "Abstract: " + abstract
-            ].filter(Boolean).join("\\n").slice(0, 20000);
+            ].filter(Boolean).join("\n").slice(0, 20000);
             const inserted = await db.prepare(
               "INSERT INTO research_sources (research_id, source_url, source_host, content_type, content, status) VALUES (?, ?, 'europepmc.org', 'application/json', ?, 'unverified')"
             ).bind(researchId, sourceUrl, content).run();
