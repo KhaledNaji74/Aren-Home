@@ -497,8 +497,7 @@ async function getMemories(db) {
 }
 
 async function getMemoryById(db, id) {
-  const result = await db.prepare(`
-    SELECT
+  const result = await db.prepare(`    SELECT
       id,
       text,
       type,
@@ -998,7 +997,6 @@ async function handleSelfEvaluate(db) {
 
   const observations = [];
   const developmentTasks = [];
-
   // 1. Find challenged lessons.
   for (const lesson of lessons) {
     const challenged = Number(
@@ -1497,8 +1495,7 @@ async function analyzeLessonEvidence(db, lessonId) {
     SELECT id, situation, outcome, strength
     FROM lesson_challenges
     WHERE lesson_id = ?
-    ORDER BY id ASC
-  `).bind(lessonId).all();
+    ORDER BY id ASC  `).bind(lessonId).all();
 
   let support = 0;
   let challenge = 0;
@@ -1997,8 +1994,7 @@ async function handleSelfDirectedResearch(db) {
     } else if (challengedCount > 0) {
       question = `What reliable evidence supports or challenges this lesson: "${lesson.text}"? Examine the conditions and limits of the lesson.`;
     } else {
-      question = `What reliable evidence supports or challenges this untested lesson: "${lesson.text}"?`;
-    }
+      question = `What reliable evidence supports or challenges this untested lesson: "${lesson.text}"?`;    }
 
     const inserted = await db.prepare(`
       INSERT INTO research (question, status, target_memory_id, research_kind)
@@ -2497,8 +2493,7 @@ async function handleResearchConclusion(db, url) {
   });
 }
 
-async function handleResearchEvidence(db, url) {
-  const researchId = Number(url.searchParams.get("research_id"));
+async function handleResearchEvidence(db, url) {  const researchId = Number(url.searchParams.get("research_id"));
   const claimId = Number(url.searchParams.get("claim_id"));
   const lessonId = Number(url.searchParams.get("lesson_id"));
   const evidence = cleanText(url.searchParams.get("evidence"));
@@ -2997,8 +2992,7 @@ async function handleResearchDiscover(db, url) {
 
       if (!response.ok) {
         skipped.push({
-          search_term: term,
-          reason: "Search provider unavailable.",
+          search_term: term,          reason: "Search provider unavailable.",
           http_status: response.status
         });
         continue;
@@ -3061,6 +3055,7 @@ async function handleResearchDiscover(db, url) {
       // Use the fuller Action API extract when the summary is missing or too short.
       // This also recovers candidates whose REST summary endpoint returns an error.
       let fallbackAttempted = false;
+      let fallbackFailure = null;
       if (extract.length < 1000) {
         fallbackAttempted = true;
         try {
@@ -3090,10 +3085,14 @@ async function handleResearchDiscover(db, url) {
             if (fullExtract.length > extract.length) {
               extract = fullExtract;
               contentLabel = "Retrieved article extract (Action API fallback)";
+            } else if (!fullExtract) {
+              fallbackFailure = "Action API returned no readable extract.";
             }
+          } else {
+            fallbackFailure = "Action API HTTP " + fullResponse.status;
           }
-        } catch (_) {
-          // A failed fallback does not invalidate an available REST summary.
+        } catch (error) {
+          fallbackFailure = "Action API error: " + String(error?.message || error);
         }
       }
 
@@ -3102,7 +3101,8 @@ async function handleResearchDiscover(db, url) {
           title,
           reason: "No readable summary or article extract from either Wikipedia endpoint.",
           summary_error: summaryFailure,
-          fallback_attempted: fallbackAttempted
+          fallback_attempted: fallbackAttempted,
+          fallback_error: fallbackFailure
         });
         continue;
       }
@@ -3146,6 +3146,107 @@ async function handleResearchDiscover(db, url) {
       });
     }
 
+    // If Wikipedia cannot provide article text, query OpenAlex for academic works.
+    // Abstracts are reconstructed from OpenAlex's inverted index and pass through
+    // the same topic relevance gate before being stored as unverified sources.
+    const alternativeProvider = { name: "OpenAlex", attempted: false, http_status: null, error: null, candidates_found: 0, sources_saved: 0 };
+    if (saved.length < 3) {
+      alternativeProvider.attempted = true;
+      try {
+        const openAlexUrl = new URL("https://api.openalex.org/works");
+        openAlexUrl.search = new URLSearchParams({
+          search: searchTerm,
+          "per-page": "12",
+          select: "id,doi,title,publication_year,authorships,abstract_inverted_index,type",
+          sort: "relevance_score:desc"
+        }).toString();
+        const openAlexResponse = await fetch(openAlexUrl.toString(), {
+          headers: {
+            "accept": "application/json",
+            "user-agent": "Aren-Home/1.0 (research source discovery)"
+          },
+          signal: AbortSignal.timeout(12000)
+        });
+        alternativeProvider.http_status = openAlexResponse.status;
+        if (!openAlexResponse.ok) {
+          alternativeProvider.error = "OpenAlex HTTP " + openAlexResponse.status;
+        } else {
+          const openAlexData = await openAlexResponse.json();
+          const works = Array.isArray(openAlexData?.results) ? openAlexData.results : [];
+          alternativeProvider.candidates_found = works.length;
+          for (const work of works) {
+            if (saved.length >= 3) break;
+            const title = String(work?.title || "").trim();
+            const inverted = work?.abstract_inverted_index;
+            if (!title || !inverted || typeof inverted !== "object") continue;
+            const words = [];
+            for (const [word, positions] of Object.entries(inverted)) {
+              for (const position of (Array.isArray(positions) ? positions : [])) {
+                if (Number.isInteger(position)) words.push([position, word]);
+              }
+            }
+            words.sort((a, b) => a[0] - b[0]);
+            const abstract = words.map(item => item[1]).join(" ").trim();
+            if (abstract.length < 120) continue;
+
+            const score = relevanceScore(title, abstract);
+            const titleMatchesTopic = score.title_matches.length > 0;
+            const relevant = (titleMatchesTopic && score.body_matches.length > 0) ||
+              score.body_matches.length >= 2;
+            if (!relevant) {
+              skipped.push({
+                title,
+                provider: "OpenAlex",
+                reason: "Rejected: insufficient topic coverage in title and abstract.",
+                relevance_score: score
+              });
+              continue;
+            }
+
+            const sourceUrl = String(work.id || "").trim();
+            if (!/^https:\/\/openalex\.org\/W\d+$/i.test(sourceUrl)) continue;
+            const existing = await db.prepare(
+              "SELECT id FROM research_sources WHERE research_id = ? AND source_url = ? LIMIT 1"
+            ).bind(researchId, sourceUrl).first();
+            if (existing) {
+              skipped.push({ title, provider: "OpenAlex", reason: "Already attached to this research question." });
+              continue;
+            }
+
+            const authors = (Array.isArray(work.authorships) ? work.authorships : [])
+              .slice(0, 5)
+              .map(item => item?.author?.display_name)
+              .filter(Boolean);
+            const content = [
+              "Title: " + title,
+              work.publication_year ? "Publication year: " + work.publication_year : "",
+              authors.length ? "Authors: " + authors.join("; ") : "",
+              work.doi ? "DOI: " + work.doi : "",
+              "Abstract: " + abstract
+            ].filter(Boolean).join("\n").slice(0, 20000);
+
+            const inserted = await db.prepare(
+              "INSERT INTO research_sources (research_id, source_url, source_host, content_type, content, status) VALUES (?, ?, 'openalex.org', 'application/json', ?, 'unverified')"
+            ).bind(researchId, sourceUrl, content).run();
+            saved.push({
+              source_id: inserted.meta?.last_row_id || null,
+              title,
+              source_url: sourceUrl,
+              doi: work.doi || null,
+              publication_year: work.publication_year || null,
+              provider: "OpenAlex",
+              source_status: "unverified",
+              relevance_score: score,
+              characters_saved: content.length
+            });
+            alternativeProvider.sources_saved++;
+          }
+        }
+      } catch (error) {
+        alternativeProvider.error = String(error?.message || error);
+      }
+    }
+
     if (saved.length) {
       await db.prepare(
         "UPDATE research SET status = CASE WHEN status IN ('planned', 'new') THEN 'source_collected' ELSE status END WHERE id = ?"
@@ -3157,8 +3258,9 @@ async function handleResearchDiscover(db, url) {
       research_id: researchId,
       search_term: searchTerm,
       search_variants: uniqueSearchTerms,
-      provider: "Wikipedia search and article summaries",
+      provider: "Wikipedia with OpenAlex academic fallback",
       candidates_found: candidates.length,
+      alternative_provider: alternativeProvider,
       sources_saved: saved.length,
       saved,
       skipped,
@@ -3497,8 +3599,7 @@ export default {
         );
       }
 
-      if (path === "/memory-history") {
-        return await handleMemoryHistory(
+      if (path === "/memory-history") {        return await handleMemoryHistory(
           db,
           url
         );
@@ -3746,4 +3847,3 @@ export default {
     }
   }
 };
-
