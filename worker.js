@@ -497,7 +497,8 @@ async function getMemories(db) {
 }
 
 async function getMemoryById(db, id) {
-  const result = await db.prepare(`    SELECT
+  const result = await db.prepare(`
+    SELECT
       id,
       text,
       type,
@@ -997,6 +998,7 @@ async function handleSelfEvaluate(db) {
 
   const observations = [];
   const developmentTasks = [];
+
   // 1. Find challenged lessons.
   for (const lesson of lessons) {
     const challenged = Number(
@@ -1495,7 +1497,8 @@ async function analyzeLessonEvidence(db, lessonId) {
     SELECT id, situation, outcome, strength
     FROM lesson_challenges
     WHERE lesson_id = ?
-    ORDER BY id ASC  `).bind(lessonId).all();
+    ORDER BY id ASC
+  `).bind(lessonId).all();
 
   let support = 0;
   let challenge = 0;
@@ -1994,7 +1997,8 @@ async function handleSelfDirectedResearch(db) {
     } else if (challengedCount > 0) {
       question = `What reliable evidence supports or challenges this lesson: "${lesson.text}"? Examine the conditions and limits of the lesson.`;
     } else {
-      question = `What reliable evidence supports or challenges this untested lesson: "${lesson.text}"?`;    }
+      question = `What reliable evidence supports or challenges this untested lesson: "${lesson.text}"?`;
+    }
 
     const inserted = await db.prepare(`
       INSERT INTO research (question, status, target_memory_id, research_kind)
@@ -2493,7 +2497,8 @@ async function handleResearchConclusion(db, url) {
   });
 }
 
-async function handleResearchEvidence(db, url) {  const researchId = Number(url.searchParams.get("research_id"));
+async function handleResearchEvidence(db, url) {
+  const researchId = Number(url.searchParams.get("research_id"));
   const claimId = Number(url.searchParams.get("claim_id"));
   const lessonId = Number(url.searchParams.get("lesson_id"));
   const evidence = cleanText(url.searchParams.get("evidence"));
@@ -2992,7 +2997,8 @@ async function handleResearchDiscover(db, url) {
 
       if (!response.ok) {
         skipped.push({
-          search_term: term,          reason: "Search provider unavailable.",
+          search_term: term,
+          reason: "Search provider unavailable.",
           http_status: response.status
         });
         continue;
@@ -3599,7 +3605,8 @@ export default {
         );
       }
 
-      if (path === "/memory-history") {        return await handleMemoryHistory(
+      if (path === "/memory-history") {
+        return await handleMemoryHistory(
           db,
           url
         );
