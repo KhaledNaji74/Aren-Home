@@ -3332,18 +3332,48 @@ async function handleResearchDiscover(db, url) {
           if (!title || abstract.length < 120) continue;
 
           const score = relevanceScore(title, abstract);
-          const distinctGroups = new Set([
-            ...score.title_matches,
-            ...score.body_matches
-          ]);
-          // A single phrase repeated in title and abstract is not enough.
-          const relevant = distinctGroups.size >= 2 &&
-            (score.title_matches.length > 0 || score.body_matches.length >= 2);
+
+          // Academic sources must connect the lesson topic to retention directly.
+          // Generic mentions of learning plus knowledge management are insufficient.
+          const titleTopicAnchor = [
+            "learning-from-experience",
+            "preservation-and-retention",
+            "memory-and-retrieval",
+            "review-and-improvement"
+          ].some(group => score.title_matches.includes(group));
+
+          const abstractLearningAnchor = [
+            "learning-from-experience",
+            "memory-and-retrieval",
+            "review-and-improvement"
+          ].some(group => score.body_matches.includes(group));
+
+          const abstractRetentionAnchor = [
+            "preservation-and-retention",
+            "memory-and-retrieval",
+            "knowledge-capture-and-transfer"
+          ].some(group => score.body_matches.includes(group));
+
+          // Require a meaningful topic in the title AND both learning and
+          // retention evidence in the abstract. This prevents broad training
+          // papers from passing on incidental body-text overlap.
+          const relevant = titleTopicAnchor &&
+            abstractLearningAnchor &&
+            abstractRetentionAnchor &&
+            score.body_matches.length >= 2;
+
+          score.academic_gate = {
+            title_topic_anchor: titleTopicAnchor,
+            abstract_learning_anchor: abstractLearningAnchor,
+            abstract_retention_anchor: abstractRetentionAnchor,
+            passed: relevant
+          };
+
           if (!relevant) {
             skipped.push({
               title,
               provider: "Europe PMC",
-              reason: "Rejected: fewer than two independent topic dimensions in title and abstract.",
+              reason: "Rejected: title must identify the learning, memory, or retention topic, and the abstract must directly cover both learning from experience and retention or memory.",
               relevance_score: score
             });
             continue;
