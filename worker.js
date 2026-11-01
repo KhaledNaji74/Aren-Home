@@ -3138,7 +3138,7 @@ async function handleResearchDiscover(db, url) {
 
       saved.push({
         source_id: inserted.meta?.last_row_id || null,
-        title: String(summary.title || title),
+        title: String(summary?.title || title),
         source_url: articleUrl,
         source_status: "unverified",
         relevance_score: score,
