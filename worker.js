@@ -3388,6 +3388,7 @@ async function handleResearchDiscover(db, url) {
       provider: "Wikipedia with OpenAlex academic fallback",
       candidates_found: candidates.length,
       alternative_provider: alternativeProvider,
+      tertiary_provider: europePmcProvider,
       sources_saved: saved.length,
       saved,
       skipped,
