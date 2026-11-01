@@ -2917,50 +2917,42 @@ async function handleResearchDiscover(db, url) {
 
   const normalize = value => String(value || "")
     .toLowerCase()
-    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/[^a-z0-9\s-]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
 
-  const stopWords = new Set([
-    "aren", "should", "could", "would", "this", "that", "with", "from",
-    "what", "which", "when", "where", "does", "have", "has", "been",
-    "into", "about", "their", "there", "these", "those", "reliable",
-    "evidence", "supports", "support", "challenges", "challenge", "untested",
-    "lesson", "lessons", "for", "and", "the", "are", "its", "own"
-  ]);
+  const normalizedQuestion = normalize(searchTerm);
+  const isDecisionTopic = /\b(decision|decisions|judgment|judgement|consequence|consequences|outcome|outcomes)\b/.test(normalizedQuestion);
 
-  const topicTerms = normalize(searchTerm).split(" ")
-    .filter(word => word.length > 2 && !stopWords.has(word));
+  // Relevance is evaluated by independent meaning groups, not raw keyword counts.
+  // This prevents long, unrelated articles from passing through incidental word overlap.
+  const profiles = isDecisionTopic
+    ? [
+        { name: "decision-making", patterns: [/\bdecision making\b/, /\bdecision-making\b/, /\bdecision theory\b/, /\bjudgment\b/, /\bjudgement\b/] },
+        { name: "outcomes-and-consequences", patterns: [/\bdecision outcomes?\b/, /\boutcome evaluation\b/, /\bconsequences? of decisions?\b/, /\bdecision consequences?\b/, /\boutcome bias\b/, /\bfeedback on decisions?\b/] },
+        { name: "learning-and-review", patterns: [/\blearning from (experience|outcomes|mistakes)\b/, /\bexperiential learning\b/, /\breflective practice\b/, /\bafter action review\b/] }
+      ]
+    : [
+        { name: "learning-from-experience", patterns: [/\blearning from experience\b/, /\blearning through experience\b/, /\bexperiential learning\b/, /\bexperience-based learning\b/, /\blessons learned\b/, /\breflective practice\b/, /\breflection on experience\b/] },
+        { name: "preservation-and-retention", patterns: [/\bknowledge retention\b/, /\bmemory retention\b/, /\borganizational memory\b/, /\binstitutional memory\b/, /\bknowledge management\b/, /\bpreserving knowledge\b/, /\bretention of knowledge\b/] },
+        { name: "review-and-improvement", patterns: [/\bafter action review\b/, /\bpostmortem analysis\b/, /\bcontinuous improvement\b/, /\breflective learning\b/, /\bexperience review\b/] }
+      ];
 
-  const termGroups = [
-    ["learn", "learning", "learned", "lesson", "lessons", "experience", "experiences", "experiential", "feedback", "reflection", "practice"],
-    ["memory", "memories", "remember", "retention", "retain", "preserve", "preservation", "recall", "knowledge"],
-    ["decision", "decisions", "judgment", "judgement", "consequence", "consequences", "outcome", "outcomes"],
-    ["review", "reviewed", "assessment", "improvement", "evidence"]
-  ];
-
-  const relevanceScore = content => {
+  const matchedProfiles = content => {
     const text = normalize(content);
-    const words = new Set(text.split(" "));
-    let exactHits = 0;
-    for (const term of topicTerms) {
-      const variants = [term];
-      if (term.endsWith("ies") && term.length > 4) variants.push(term.slice(0, -3) + "y");
-      if (term.endsWith("s") && term.length > 3) variants.push(term.slice(0, -1));
-      if (term.endsWith("es") && term.length > 4) variants.push(term.slice(0, -2));
-      if (variants.some(variant => words.has(variant) || (variant.length > 4 && text.includes(variant)))) exactHits++;
-    }
-    const groupHits = termGroups.filter(group =>
-      group.some(term => words.has(term))
-    ).length;
-    return { exactHits, groupHits };
+    return profiles
+      .filter(profile => profile.patterns.some(pattern => pattern.test(text)))
+      .map(profile => profile.name);
   };
 
-  const relevantEnough = content => {
-    const score = relevanceScore(content);
-    // A single incidental keyword is not enough to accept a source.
-    // Require multiple distinct topic terms or matches across multiple concept groups.
-    return score.exactHits >= 2 || score.groupHits >= 2;
+  const relevanceScore = (title, body) => {
+    const titleMatches = matchedProfiles(title);
+    const bodyMatches = matchedProfiles(body);
+    return {
+      title_matches: titleMatches,
+      body_matches: bodyMatches,
+      matched_concept_groups: [...new Set([...titleMatches, ...bodyMatches])].length
+    };
   };
 
   const searchTerms = [searchTerm];
@@ -3104,27 +3096,20 @@ async function handleResearchDiscover(db, url) {
         contentLabel + ": " + extract
       ].filter(Boolean).join("\n").slice(0, 20000);
 
-      const scoredText = "Title: " + title + "\n" + content;
-      const score = relevanceScore(scoredText);
-      const titleScore = relevanceScore(title);
-      const bodyScore = relevanceScore(content);
-      const normalizedTitle = normalize(title);
-      const titleIsOnTopic =
-        /\b(decision|decisions|decision making|judgment|judgement|decision theory|outcome bias|rational choice)\b/.test(normalizedTitle);
-      const bodyHasTopicEvidence =
-        bodyScore.exactHits >= 1 || bodyScore.groupHits >= 1;
-      const bodyHasStrongEvidence =
-        bodyScore.exactHits >= 3 ||
-        (bodyScore.exactHits >= 2 && bodyScore.groupHits >= 2);
-      // Prefer sources whose title names the research topic. Otherwise require
-      // stronger evidence in the article body; generic keyword overlap is insufficient.
-      if (!((titleIsOnTopic && bodyHasTopicEvidence) || bodyHasStrongEvidence)) {
+      const score = relevanceScore(title, content);
+      const titleMatchesTopic = score.title_matches.length > 0;
+      const bodyMatchesTopic = score.body_matches.length > 0;
+      // Accept a source only when its title identifies the topic and its body
+      // contains corroborating concepts, or when the body independently covers
+      // at least two distinct concept groups. Repeated incidental words do not count.
+      const relevant =
+        (titleMatchesTopic && bodyMatchesTopic) ||
+        score.body_matches.length >= 2;
+      if (!relevant) {
         skipped.push({
           title,
-          reason: "Rejected by the initial relevance filter.",
-          relevance_score: score,
-          title_relevance: titleScore,
-          body_relevance: bodyScore
+          reason: "Rejected: insufficient semantic topic coverage in title and article body.",
+          relevance_score: score
         });
         continue;
       }
