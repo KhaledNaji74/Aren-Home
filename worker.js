@@ -3594,12 +3594,12 @@ async function handleAutonomousResearchReview(db) {
   for (const source of (pending.results || [])) {
     const host = String(source.source_host || '').toLowerCase();
     const body = String(source.content || '');
-    const titleMatch = body.match(/^Title:\\s*(.+)$/im);
+    const titleMatch = body.match(/^Title:\s*(.+)$/im);
     const title = titleMatch ? titleMatch[1].trim() : '';
-    const doi = /\\bDOI:\\s*10\\.\\d{4,9}\\//i.test(body);
-    const publicationDate = /\\bPublication (?:date|year):\\s*\\S+/i.test(body);
+    const doi = /\bDOI:\s*10\.\d{4,9}\//i.test(body);
+    const publicationDate = /\bPublication (?:date|year):\s*\S+/i.test(body);
     const publisherClass =
-      /(^|\\.)europepmc\\.org$|(^|\\.)openalex\\.org$|(^|\\.)pubmed\\.ncbi\\.nlm\\.nih\\.gov$/.test(host)
+      /(^|\.)europepmc\.org$|(^|\.)openalex\.org$|(^|\.)pubmed\.ncbi\.nlm\.nih\.gov$/.test(host)
         ? 'academic-index'
         : host === 'en.wikipedia.org'
           ? 'reference-encyclopedia'
