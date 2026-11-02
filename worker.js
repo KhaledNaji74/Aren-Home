@@ -3287,7 +3287,7 @@ async function handleResearchDiscover(db, url) {
             skipped.push({
               title,
               provider: "Europe PMC",
-              reason: "Rejected: title must identify the learning, memory, or retention topic, and the abstract must directly cover both learning from experience and retention or memory.",
+              reason: "Rejected: the academic title and abstract did not satisfy the topic-specific relevance requirements for this research question.",
               relevance_score: score
             });
             continue;
