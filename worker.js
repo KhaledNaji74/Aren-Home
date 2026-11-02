@@ -3463,6 +3463,104 @@ async function handleAutonomousResearchDiscovery(db) {
   }
 }
 
+async function handleManualResearchRetry(db, url) {
+  const researchId = Number(url.searchParams.get("research_id") || 0);
+  // This controlled test is intentionally limited to the two existing
+  // self-directed research questions. It does not reset or delete history.
+  if (![1, 2].includes(researchId)) {
+    return json({
+      status: "Manual retry not allowed.",
+      allowed_research_ids: [1, 2],
+      rule: "Only the two existing self-directed research questions are enabled for this controlled test."
+    }, 400);
+  }
+
+  const research = await db.prepare(
+    "SELECT id, question FROM research WHERE id = ? AND research_kind = 'self_directed'"
+  ).bind(researchId).first();
+  if (!research) {
+    return json({ status: "Self-directed research question not found.", research_id: researchId }, 404);
+  }
+
+  const priorManual = await db.prepare(
+    "SELECT id FROM research_discovery_runs WHERE research_id = ? AND status LIKE 'manual_retry%' LIMIT 1"
+  ).bind(researchId).first();
+  if (priorManual) {
+    return json({
+      status: "Controlled manual retry already used for this research question.",
+      research_id: researchId,
+      rule: "One controlled retry per question; prior discovery history remains unchanged."
+    }, 409);
+  }
+
+  const beforeRow = await db.prepare(
+    "SELECT COUNT(*) AS count FROM research_sources WHERE research_id = ?"
+  ).bind(researchId).first();
+  const sourcesBefore = Number(beforeRow?.count || 0);
+  const attemptRow = await db.prepare(
+    "SELECT COALESCE(MAX(attempt_number), 0) AS attempt_number FROM research_discovery_runs WHERE research_id = ?"
+  ).bind(researchId).first();
+  const attemptNumber = Number(attemptRow?.attempt_number || 0) + 1;
+
+  try {
+    const response = await handleResearchDiscover(
+      db,
+      new URL("https://aren-home.workers.dev/research-discover?research_id=" + researchId)
+    );
+    const result = await response.json();
+    const afterRow = await db.prepare(
+      "SELECT COUNT(*) AS count FROM research_sources WHERE research_id = ?"
+    ).bind(researchId).first();
+    const sourcesAfter = Number(afterRow?.count || 0);
+    const status = sourcesAfter > sourcesBefore
+      ? "manual_retry_sources_added"
+      : "manual_retry_no_new_sources";
+
+    await db.prepare(`
+      INSERT INTO research_discovery_runs
+        (research_id, attempt_number, sources_before, sources_after, status, details)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).bind(
+      researchId,
+      attemptNumber,
+      sourcesBefore,
+      sourcesAfter,
+      status,
+      JSON.stringify(result)
+    ).run();
+
+    return json({
+      ...result,
+      research_id: researchId,
+      attempt_number: attemptNumber,
+      sources_before: sourcesBefore,
+      sources_after: sourcesAfter,
+      controlled_manual_retry: true,
+      rule: "One-time controlled retry. Existing sources and discovery history are preserved. New sources remain unverified; no claims, lessons, or principles are changed."
+    });
+  } catch (error) {
+    await db.prepare(`
+      INSERT INTO research_discovery_runs
+        (research_id, attempt_number, sources_before, sources_after, status, details)
+      VALUES (?, ?, ?, ?, 'manual_retry_failed', ?)
+    `).bind(
+      researchId,
+      attemptNumber,
+      sourcesBefore,
+      sourcesBefore,
+      String(error?.message || error)
+    ).run();
+
+    return json({
+      status: "Controlled manual research retry failed.",
+      research_id: researchId,
+      attempt_number: attemptNumber,
+      error: String(error?.message || error),
+      rule: "Failure is recorded; previous research history remains unchanged."
+    }, 502);
+  }
+}
+
 async function handleAutonomousResearchReview(db) {
   const pending = await db.prepare(`
     SELECT s.id AS source_id, s.research_id, s.source_url, s.source_host,
@@ -4080,6 +4178,10 @@ export default {
 
       if (path === "/research-discover") {
         return await handleResearchDiscover(db, url);
+      }
+
+      if (path === "/research-retry") {
+        return await handleManualResearchRetry(db, url);
       }
 
       if (path === "/research-url") {
