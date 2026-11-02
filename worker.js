@@ -333,6 +333,19 @@ async function ensureTables(db) {
   `).run();
 
   await db.prepare(`
+    CREATE TABLE IF NOT EXISTS research_discovery_runs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      research_id INTEGER NOT NULL,
+      attempt_number INTEGER NOT NULL,
+      sources_before INTEGER DEFAULT 0,
+      sources_after INTEGER DEFAULT 0,
+      status TEXT NOT NULL,
+      details TEXT,
+      created DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `).run();
+
+  await db.prepare(`
     CREATE TABLE IF NOT EXISTS lesson_challenges (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       lesson_id INTEGER NOT NULL,
@@ -3458,34 +3471,94 @@ async function handleResearchDiscover(db, url) {
 }
 
 async function handleAutonomousResearchDiscovery(db) {
+  // Retry discovery for incomplete research, including questions that already
+  // have weak or insufficient sources. Each question gets at most three
+  // autonomous attempts and six collected sources; source text stays unverified.
   const pending = await db.prepare(`
-    SELECT r.id
+    SELECT
+      r.id,
+      COUNT(DISTINCT s.id) AS source_count,
+      COUNT(DISTINCT d.id) AS attempt_count
     FROM research r
+    LEFT JOIN research_sources s ON s.research_id = r.id
+    LEFT JOIN research_discovery_runs d ON d.research_id = r.id
     WHERE r.research_kind = 'self_directed'
       AND r.status IN ('planned', 'new', 'source_collected')
-      AND NOT EXISTS (
-        SELECT 1 FROM research_sources s WHERE s.research_id = r.id
-      )
-    ORDER BY r.id ASC
+    GROUP BY r.id
+    HAVING COUNT(DISTINCT s.id) < 6
+       AND COUNT(DISTINCT d.id) < 3
+    ORDER BY COUNT(DISTINCT s.id) ASC, r.id ASC
     LIMIT 1
   `).first();
 
   if (!pending) {
     return {
-      status: "No self-directed research question needs initial source discovery.",
-      sources_saved: 0
+      status: "No self-directed research question needs discovery or remains within its retry limits.",
+      sources_saved: 0,
+      retry_limit_per_question: 3,
+      source_limit_per_question: 6
     };
   }
 
-  const response = await handleResearchDiscover(
-    db,
-    new URL("https://aren-home.workers.dev/research-discover?research_id=" + pending.id)
-  );
-  const result = await response.json();
-  return {
-    ...result,
-    triggered_by: "scheduled_autonomous_cycle"
-  };
+  const researchId = Number(pending.id);
+  const sourcesBefore = Number(pending.source_count || 0);
+  const attemptNumber = Number(pending.attempt_count || 0) + 1;
+
+  try {
+    const response = await handleResearchDiscover(
+      db,
+      new URL("https://aren-home.workers.dev/research-discover?research_id=" + researchId)
+    );
+    const result = await response.json();
+    const sourcesAfterResult = await db.prepare(
+      "SELECT COUNT(*) AS count FROM research_sources WHERE research_id = ?"
+    ).bind(researchId).first();
+    const sourcesAfter = Number(sourcesAfterResult?.count || 0);
+
+    await db.prepare(`
+      INSERT INTO research_discovery_runs
+        (research_id, attempt_number, sources_before, sources_after, status, details)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).bind(
+      researchId,
+      attemptNumber,
+      sourcesBefore,
+      sourcesAfter,
+      sourcesAfter > sourcesBefore ? "sources_added" : "no_new_sources",
+      JSON.stringify(result)
+    ).run();
+
+    return {
+      ...result,
+      research_id: researchId,
+      attempt_number: attemptNumber,
+      retry_limit_per_question: 3,
+      sources_before: sourcesBefore,
+      sources_after: sourcesAfter,
+      triggered_by: "scheduled_autonomous_cycle",
+      rule: "Collected sources remain unverified; discovery never creates facts or changes principles."
+    };
+  } catch (error) {
+    await db.prepare(`
+      INSERT INTO research_discovery_runs
+        (research_id, attempt_number, sources_before, sources_after, status, details)
+      VALUES (?, ?, ?, ?, 'failed', ?)
+    `).bind(
+      researchId,
+      attemptNumber,
+      sourcesBefore,
+      sourcesBefore,
+      String(error?.message || error)
+    ).run();
+
+    return {
+      status: "Autonomous source discovery attempt failed.",
+      research_id: researchId,
+      attempt_number: attemptNumber,
+      error: String(error?.message || error),
+      triggered_by: "scheduled_autonomous_cycle"
+    };
+  }
 }
 
 async function handleResearchSources(db, url) {
@@ -3530,7 +3603,8 @@ async function handleHealth(db) {
     "research_conclusions",
     "research_evidence",
     "research_sources",
-    "schema_migrations"
+    "research_discovery_runs",
+    "schema_migrations
   ];
 
   const checks = [];
