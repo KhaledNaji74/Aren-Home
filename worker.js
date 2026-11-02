@@ -3604,7 +3604,7 @@ async function handleHealth(db) {
     "research_evidence",
     "research_sources",
     "research_discovery_runs",
-    "schema_migrations
+    "schema_migrations"
   ];
 
   const checks = [];
