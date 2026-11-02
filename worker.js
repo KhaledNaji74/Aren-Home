@@ -344,6 +344,20 @@ async function ensureTables(db) {
       created DATETIME DEFAULT CURRENT_TIMESTAMP
     )
   `).run();
+  await db.prepare(`
+    CREATE TABLE IF NOT EXISTS research_source_reviews (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      source_id INTEGER NOT NULL UNIQUE,
+      research_id INTEGER NOT NULL,
+      publisher_class TEXT NOT NULL,
+      relevance_score REAL DEFAULT 0,
+      relevance_band TEXT NOT NULL,
+      metadata TEXT,
+      flags TEXT,
+      status TEXT NOT NULL DEFAULT 'screened_unverified',
+      reviewed_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `).run();
 
   await db.prepare(`
     CREATE TABLE IF NOT EXISTS lesson_challenges (
@@ -2064,6 +2078,7 @@ async function handleAutonomousCycle(db) {
   const selfDirectedResearch = await researchResponse.json();
 
   const researchDiscovery = await handleAutonomousResearchDiscovery(db);
+  const researchReview = await handleAutonomousResearchReview(db);
 
   const developmentResponse = await handleExecuteDevelopment(db);
   const development = await developmentResponse.json();
@@ -2074,6 +2089,7 @@ async function handleAutonomousCycle(db) {
     lesson_evaluation: lessonEvaluation,
     self_directed_research: selfDirectedResearch,
     research_discovery: researchDiscovery,
+    research_review: researchReview,
     development
   };
 
@@ -3561,6 +3577,119 @@ async function handleAutonomousResearchDiscovery(db) {
   }
 }
 
+async function handleAutonomousResearchReview(db) {
+  const pending = await db.prepare(`
+    SELECT s.id AS source_id, s.research_id, s.source_url, s.source_host,
+           s.content_type, s.content, r.question
+    FROM research_sources s
+    INNER JOIN research r ON r.id = s.research_id
+    LEFT JOIN research_source_reviews v ON v.source_id = s.id
+    WHERE r.research_kind = 'self_directed'
+      AND v.id IS NULL
+    ORDER BY s.id ASC
+    LIMIT 6
+  `).all();
+
+  const reviewed = [];
+  for (const source of (pending.results || [])) {
+    const host = String(source.source_host || '').toLowerCase();
+    const body = String(source.content || '');
+    const titleMatch = body.match(/^Title:\s*(.+)$/im);
+    const title = titleMatch ? titleMatch[1].trim() : '';
+    const doi = /\bDOI:\s*10\.\d{4,9}\//i.test(body);
+    const publicationDate = /\bPublication (?:date|year):\s*\S+/i.test(body);
+    const publisherClass =
+      /(^|\.)europepmc\.org$|(^|\.)openalex\.org$|(^|\.)pubmed\.ncbi\.nlm\.nih\.gov$/.test(host)
+        ? 'academic-index'
+        : host === 'en.wikipedia.org'
+          ? 'reference-encyclopedia'
+          : 'unclassified-publisher';
+
+    const topicMatch = String(source.question || '')
+      .match(/"([^"]{3,300})"/);
+    const topic = (topicMatch ? topicMatch[1] : source.question || '').slice(0, 300);
+    const lexical = wordOverlap(topic, title + ' ' + body);
+    const concepts = conceptScore(topic, title + ' ' + body);
+    const relevance = Number(Math.max(lexical, concepts).toFixed(6));
+    const relevanceBand =
+      relevance >= 0.25 ? 'strong_topic_overlap' :
+      relevance >= 0.12 ? 'partial_topic_overlap' :
+      'weak_topic_overlap';
+
+    const flags = [];
+    if (!title) flags.push('No title metadata found in stored text.');
+    if (body.length < 250) flags.push('Stored text is short and may be insufficient for assessment.');
+    if (!doi && !publicationDate) flags.push('No DOI or publication date metadata found.');
+    if (publisherClass === 'unclassified-publisher') flags.push('Publisher type is not classified by this screening rule.');
+    if (relevanceBand === 'weak_topic_overlap') flags.push('Stored text has weak lexical/concept overlap with the research topic.');
+
+    const metadata = {
+      title: title || null,
+      doi_present: doi,
+      publication_date_or_year_present: publicationDate,
+      source_host: host || null,
+      content_type: source.content_type || null,
+      characters: body.length
+    };
+
+    const record = {
+      source_id: source.source_id,
+      research_id: source.research_id,
+      publisher_class: publisherClass,
+      relevance_score: relevance,
+      relevance_band: relevanceBand,
+      metadata,
+      flags,
+      status: 'screened_unverified'
+    };
+
+    await db.prepare(`
+      INSERT OR IGNORE INTO research_source_reviews
+        (source_id, research_id, publisher_class, relevance_score, relevance_band, metadata, flags, status)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 'screened_unverified')
+    `).bind(
+      source.source_id,
+      source.research_id,
+      publisherClass,
+      relevance,
+      relevanceBand,
+      JSON.stringify(metadata),
+      JSON.stringify(flags)
+    ).run();
+
+    reviewed.push(record);
+  }
+
+  return {
+    status: 'Preliminary source screening completed.',
+    sources_screened: reviewed.length,
+    reviewed,
+    rule: 'This is a transparent metadata and topic-overlap screen, not fact verification. No source is marked verified, no claim is accepted, and no lesson or principle is changed.'
+  };
+}
+
+async function handleResearchSourceReviews(db, url) {
+  const researchId = Number(url.searchParams.get('research_id') || 0);
+  if (researchId && !Number.isSafeInteger(researchId)) {
+    return textResponse('Invalid research_id', 400);
+  }
+
+  const rows = await db.prepare(`
+    SELECT v.*, s.source_url, s.source_host, s.status AS source_status
+    FROM research_source_reviews v
+    INNER JOIN research_sources s ON s.id = v.source_id
+    WHERE (? = 0 OR v.research_id = ?)
+    ORDER BY v.id ASC
+  `).bind(researchId, researchId).all();
+
+  return json({
+    status: 'Preliminary source reviews retrieved.',
+    review_count: rows.results?.length || 0,
+    reviews: rows.results || [],
+    rule: 'Screening results are not verification or proof.'
+  });
+}
+
 async function handleResearchSources(db, url) {
   const researchId = Number(url.searchParams.get("research_id") || 0);
   if (!researchId) return textResponse("Missing research_id", 400);
@@ -3604,6 +3733,7 @@ async function handleHealth(db) {
     "research_evidence",
     "research_sources",
     "research_discovery_runs",
+    "research_source_reviews",
     "schema_migrations"
   ];
 
@@ -4071,6 +4201,10 @@ export default {
           db,
           url
         );
+      }
+
+      if (path === "/research-source-reviews") {
+        return await handleResearchSourceReviews(db, url);
       }
 
       if (path === "/research-sources") {
