@@ -2986,6 +2986,50 @@ async function handleResearchDiscover(db, url) {
     };
   };
 
+  // Academic candidates must have a topic-specific title and meaningful
+  // abstract coverage. Incidental keyword overlap alone is never sufficient.
+  const academicRelevanceGate = score => {
+    const titleGroups = score.title_matches || [];
+    const bodyGroups = score.body_matches || [];
+    if (isDecisionTopic) {
+      const titleTopicAnchor =
+        titleGroups.includes("decision-making") ||
+        titleGroups.includes("outcomes-and-consequences");
+      const abstractDecisionAnchor = bodyGroups.includes("decision-making");
+      const abstractOutcomeOrLearningAnchor =
+        bodyGroups.includes("outcomes-and-consequences") ||
+        bodyGroups.includes("learning-and-review");
+      return {
+        title_topic_anchor: titleTopicAnchor,
+        abstract_decision_anchor: abstractDecisionAnchor,
+        abstract_outcome_or_learning_anchor: abstractOutcomeOrLearningAnchor,
+        passed: titleTopicAnchor && abstractDecisionAnchor && abstractOutcomeOrLearningAnchor
+      };
+    }
+    const titleTopicAnchor = [
+      "learning-from-experience",
+      "preservation-and-retention",
+      "memory-and-retrieval",
+      "review-and-improvement"
+    ].some(group => titleGroups.includes(group));
+    const abstractLearningAnchor = [
+      "learning-from-experience",
+      "memory-and-retrieval",
+      "review-and-improvement"
+    ].some(group => bodyGroups.includes(group));
+    const abstractRetentionAnchor = [
+      "preservation-and-retention",
+      "memory-and-retrieval",
+      "knowledge-capture-and-transfer"
+    ].some(group => bodyGroups.includes(group));
+    return {
+      title_topic_anchor: titleTopicAnchor,
+      abstract_learning_anchor: abstractLearningAnchor,
+      abstract_retention_anchor: abstractRetentionAnchor,
+      passed: titleTopicAnchor && abstractLearningAnchor && abstractRetentionAnchor
+    };
+  };
+
   const searchTerms = [searchTerm];
   if (/lesson|learn|experience|review/i.test(searchTerm)) {
     searchTerms.push("learning from experience");
@@ -3044,148 +3088,20 @@ async function handleResearchDiscover(db, url) {
 
     const candidates = [...candidateMap.values()].slice(0, 12);
 
+    // Wikipedia search is used only to discover possible vocabulary and leads.
+    // Reference-encyclopedia pages are not saved as research sources.
     for (const candidate of candidates) {
-      if (saved.length >= 3) break;
       const title = String(candidate.title || "").trim();
       if (!title) continue;
-
-      const articleUrl = "https://en.wikipedia.org/wiki/" +
-        encodeURIComponent(title.replace(/ /g, "_"));
-
-      const existing = await db.prepare(
-        "SELECT id FROM research_sources WHERE research_id = ? AND source_url = ? LIMIT 1"
-      ).bind(researchId, articleUrl).first();
-
-      if (existing) {
-        skipped.push({ title, reason: "Already attached to this research question." });
-        continue;
-      }
-
-      // Try the REST summary first, but do not discard a candidate if that
-      // endpoint is unavailable. The Action API is the independent fallback.
-      let summary = null;
-      let extract = "";
-      let contentLabel = "";
-      let summaryFailure = null;
-
-      const summaryUrl = "https://en.wikipedia.org/api/rest_v1/page/summary/" +
-        encodeURIComponent(title.replace(/ /g, "_"));
-      try {
-        const summaryResponse = await fetch(summaryUrl, {
-          headers: {
-            "accept": "application/json",
-            "user-agent": "Aren-Home/1.0 (research source discovery)"
-          },
-          signal: AbortSignal.timeout(10000)
-        });
-        if (summaryResponse.ok) {
-          summary = await summaryResponse.json();
-          extract = String(summary.extract || "").trim();
-          if (extract) contentLabel = "Retrieved summary";
-        } else {
-          summaryFailure = "REST summary HTTP " + summaryResponse.status;
-        }
-      } catch (error) {
-        summaryFailure = String(error?.message || error);
-      }
-
-      // Use the fuller Action API extract when the summary is missing or too short.
-      // This also recovers candidates whose REST summary endpoint returns an error.
-      let fallbackAttempted = false;
-      let fallbackFailure = null;
-      if (extract.length < 1000) {
-        fallbackAttempted = true;
-        try {
-          const fullUrl = new URL("https://en.wikipedia.org/w/api.php");
-          fullUrl.search = new URLSearchParams({
-            action: "query",
-            prop: "extracts",
-            exintro: "0",
-            explaintext: "1",
-            exsectionformat: "plain",
-            titles: title,
-            format: "json",
-            utf8: "1"
-          }).toString();
-          const fullResponse = await fetch(fullUrl.toString(), {
-            headers: {
-              "accept": "application/json",
-              "user-agent": "Aren-Home/1.0 (research source discovery)"
-            },
-            signal: AbortSignal.timeout(10000)
-          });
-          if (fullResponse.ok) {
-            const fullData = await fullResponse.json();
-            const pages = fullData?.query?.pages || {};
-            const page = Object.values(pages)[0];
-            const fullExtract = String(page?.extract || "").trim();
-            if (fullExtract.length > extract.length) {
-              extract = fullExtract;
-              contentLabel = "Retrieved article extract (Action API fallback)";
-            } else if (!fullExtract) {
-              fallbackFailure = "Action API returned no readable extract.";
-            }
-          } else {
-            fallbackFailure = "Action API HTTP " + fullResponse.status;
-          }
-        } catch (error) {
-          fallbackFailure = "Action API error: " + String(error?.message || error);
-        }
-      }
-
-      if (!extract.trim()) {
-        skipped.push({
-          title,
-          reason: "No readable summary or article extract from either Wikipedia endpoint.",
-          summary_error: summaryFailure,
-          fallback_attempted: fallbackAttempted,
-          fallback_error: fallbackFailure
-        });
-        continue;
-      }
-
-      const content = [
-        "Title: " + String(summary?.title || title),
-        summary?.description ? "Description: " + summary.description : "",
-        contentLabel + ": " + extract
-      ].filter(Boolean).join("\n").slice(0, 20000);
-
-      const relevanceBody = [summary?.description || "", contentLabel + ": " + extract].filter(Boolean).join("\n");
-      const score = relevanceScore(title, relevanceBody);
-      const titleMatchesTopic = score.title_matches.length > 0;
-      const bodyMatchesTopic = score.body_matches.length > 0;
-      // Accept a source only when its title identifies the topic and its body
-      // contains corroborating concepts, or when the body independently covers
-      // at least two distinct concept groups. Repeated incidental words do not count.
-      const relevant =
-        (titleMatchesTopic && bodyMatchesTopic) ||
-        score.body_matches.length >= 2;
-      if (!relevant) {
-        skipped.push({
-          title,
-          reason: "Rejected: insufficient semantic topic coverage in title and article body.",
-          relevance_score: score
-        });
-        continue;
-      }
-
-      const inserted = await db.prepare(
-        "INSERT INTO research_sources (research_id, source_url, source_host, content_type, content, status) VALUES (?, ?, 'en.wikipedia.org', 'application/json', ?, 'unverified')"
-      ).bind(researchId, articleUrl, content).run();
-
-      saved.push({
-        source_id: inserted.meta?.last_row_id || null,
-        title: String(summary?.title || title),
-        source_url: articleUrl,
-        source_status: "unverified",
-        relevance_score: score,
-        characters_saved: content.length
+      skipped.push({
+        title,
+        provider: "Wikipedia search",
+        reason: "Reference-encyclopedia results are discovery leads only; academic-index sources are preferred and only academic candidates may be saved automatically."
       });
     }
 
-    // If Wikipedia cannot provide article text, query OpenAlex for academic works.
-    // Abstracts are reconstructed from OpenAlex's inverted index and pass through
-    // the same topic relevance gate before being stored as unverified sources.
+    // Search academic indexes directly. Wikipedia results are never stored.
+    // OpenAlex abstracts are reconstructed and must pass a topic-specific gate.
     const alternativeProvider = { name: "OpenAlex", attempted: false, http_status: null, error: null, candidates_found: 0, sources_saved: 0 };
     if (saved.length < 3) {
       alternativeProvider.attempted = true;
@@ -3229,14 +3145,13 @@ async function handleResearchDiscover(db, url) {
             if (abstract.length < 120) continue;
 
             const score = relevanceScore(title, abstract);
-            const titleMatchesTopic = score.title_matches.length > 0;
-            const relevant = (titleMatchesTopic && score.body_matches.length > 0) ||
-              score.body_matches.length >= 2;
-            if (!relevant) {
+            const academicGate = academicRelevanceGate(score);
+            score.academic_gate = academicGate;
+            if (!academicGate.passed) {
               skipped.push({
                 title,
                 provider: "OpenAlex",
-                reason: "Rejected: insufficient topic coverage in title and abstract.",
+                reason: "Rejected: academic title and abstract did not both demonstrate the required topic-specific concepts.",
                 relevance_score: score
               });
               continue;
@@ -3364,39 +3279,9 @@ async function handleResearchDiscover(db, url) {
 
           // Academic sources must connect the lesson topic to retention directly.
           // Generic mentions of learning plus knowledge management are insufficient.
-          const titleTopicAnchor = [
-            "learning-from-experience",
-            "preservation-and-retention",
-            "memory-and-retrieval",
-            "review-and-improvement"
-          ].some(group => score.title_matches.includes(group));
-
-          const abstractLearningAnchor = [
-            "learning-from-experience",
-            "memory-and-retrieval",
-            "review-and-improvement"
-          ].some(group => score.body_matches.includes(group));
-
-          const abstractRetentionAnchor = [
-            "preservation-and-retention",
-            "memory-and-retrieval",
-            "knowledge-capture-and-transfer"
-          ].some(group => score.body_matches.includes(group));
-
-          // Require a meaningful topic in the title AND both learning and
-          // retention evidence in the abstract. This prevents broad training
-          // papers from passing on incidental body-text overlap.
-          const relevant = titleTopicAnchor &&
-            abstractLearningAnchor &&
-            abstractRetentionAnchor &&
-            score.body_matches.length >= 2;
-
-          score.academic_gate = {
-            title_topic_anchor: titleTopicAnchor,
-            abstract_learning_anchor: abstractLearningAnchor,
-            abstract_retention_anchor: abstractRetentionAnchor,
-            passed: relevant
-          };
+          const academicGate = academicRelevanceGate(score);
+          score.academic_gate = academicGate;
+          const relevant = academicGate.passed;
 
           if (!relevant) {
             skipped.push({
@@ -3468,8 +3353,9 @@ async function handleResearchDiscover(db, url) {
       research_id: researchId,
       search_term: searchTerm,
       search_variants: uniqueSearchTerms,
-      provider: "Wikipedia with OpenAlex academic fallback",
+      provider: "OpenAlex and Europe PMC academic indexes; Wikipedia search used only for discovery leads",
       candidates_found: candidates.length,
+      wikipedia_leads_only: candidates.length,
       alternative_provider: alternativeProvider,
       tertiary_provider: europePmcProvider,
       sources_saved: saved.length,
