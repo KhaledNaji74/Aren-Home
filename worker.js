@@ -3686,7 +3686,7 @@ async function handleAutonomousResearchReview(db, researchId = 0) {
     };
 
     await db.prepare(`
-      INSERT OR IGNORE INTO research_source_reviews
+      INSERT INTO research_source_reviews
         (source_id, research_id, publisher_class, relevance_score, relevance_band, metadata, flags, status)
       VALUES (?, ?, ?, ?, ?, ?, ?, 'screened_v2_unverified')
       ON CONFLICT(source_id) DO UPDATE SET
