@@ -3561,7 +3561,49 @@ async function handleManualResearchRetry(db, url) {
   }
 }
 
-async function handleAutonomousResearchReview(db) {
+function researchTopicFit(topic, title, body) {
+  const t = normalize(topic);
+  const titleText = normalize(title);
+  const fullText = normalize(title + ' ' + body);
+  let groups;
+
+  if (/preserve|preservation|retain|retention|lesson|experience|experiential/.test(t)) {
+    groups = [
+      ['experience', 'experiential', 'learning', 'learn', 'reflection', 'reflective'],
+      ['memory', 'remember', 'retention', 'preserve', 'preservation', 'retain', 'lesson']
+    ];
+  } else if (/decision|consequence|outcome|impact/.test(t)) {
+    groups = [
+      ['decision', 'decisions', 'decision-making', 'choice', 'choices', 'judgment'],
+      ['consequence', 'consequences', 'outcome', 'outcomes', 'result', 'results', 'impact', 'effects']
+    ];
+  } else {
+    groups = [tokenize(topic).filter(word => word.length >= 6).slice(0, 4)];
+  }
+
+  const has = (text, terms) => {
+    const words = new Set(text.split(/\\s+/).filter(Boolean));
+    return terms.some(term => words.has(term));
+  };
+
+  const matched = groups.filter(group => group.length && has(fullText, group));
+  const titleAnchor = groups.some(group => group.length && has(titleText, group));
+  const excludedTitle = /^(list of|category:|characters|episodes)/i.test(title.trim());
+  const score = groups.length ? matched.length / groups.length : 0;
+
+  return {
+    score: excludedTitle ? Math.min(score, 0.1) : score,
+    groups_required: groups.length,
+    groups_matched: excludedTitle ? 0 : matched.length,
+    missing_groups: groups
+      .filter(group => !has(fullText, group))
+      .map(group => group.join('/')),
+    title_anchor: titleAnchor && !excludedTitle,
+    excluded_title: excludedTitle
+  };
+}
+
+async function handleAutonomousResearchReview(db, researchId = 0) {
   const pending = await db.prepare(`
     SELECT s.id AS source_id, s.research_id, s.source_url, s.source_host,
            s.content_type, s.content, r.question
@@ -3569,10 +3611,11 @@ async function handleAutonomousResearchReview(db) {
     INNER JOIN research r ON r.id = s.research_id
     LEFT JOIN research_source_reviews v ON v.source_id = s.id
     WHERE r.research_kind = 'self_directed'
-      AND v.id IS NULL
+      AND (? = 0 OR s.research_id = ?)
+      AND (v.id IS NULL OR v.status != 'screened_v2_unverified')
     ORDER BY s.id ASC
-    LIMIT 6
-  `).all();
+    LIMIT 100
+  `).bind(researchId, researchId).all();
 
   const reviewed = [];
   for (const source of (pending.results || [])) {
@@ -3594,13 +3637,28 @@ async function handleAutonomousResearchReview(db) {
     const topic = (topicMatch ? topicMatch[1] : source.question || '').slice(0, 300);
     const lexical = wordOverlap(topic, title + ' ' + body);
     const concepts = conceptScore(topic, title + ' ' + body);
-    const relevance = Number(Math.max(lexical, concepts).toFixed(6));
+    const topicFit = researchTopicFit(topic, title, body);
+    const genericScore = Math.max(lexical, concepts);
+    // Generic word overlap is never enough to label a source strongly relevant.
+    // A source must cover the topic's specific evidence dimensions.
+    const relevance = Number(Math.min(genericScore, topicFit.score).toFixed(6));
     const relevanceBand =
-      relevance >= 0.25 ? 'strong_topic_overlap' :
-      relevance >= 0.12 ? 'partial_topic_overlap' :
-      'weak_topic_overlap';
+      topicFit.groups_matched === topicFit.groups_required && topicFit.title_anchor
+        ? 'strong_topic_overlap'
+        : topicFit.groups_matched > 0
+          ? 'partial_topic_overlap'
+          : 'weak_topic_overlap';
 
     const flags = [];
+    if (topicFit.groups_matched < topicFit.groups_required) {
+      flags.push('Missing one or more required topic dimensions: ' + topicFit.missing_groups.join(', ') + '.');
+    }
+    if (!topicFit.title_anchor) {
+      flags.push('Source title does not contain a specific topic anchor.');
+    }
+    if (topicFit.excluded_title) {
+      flags.push('Title pattern indicates a list or entertainment index rather than topic evidence.');
+    }
     if (!title) flags.push('No title metadata found in stored text.');
     if (body.length < 250) flags.push('Stored text is short and may be insufficient for assessment.');
     if (!doi && !publicationDate) flags.push('No DOI or publication date metadata found.');
@@ -3624,13 +3682,21 @@ async function handleAutonomousResearchReview(db) {
       relevance_band: relevanceBand,
       metadata,
       flags,
-      status: 'screened_unverified'
+      status: 'screened_v2_unverified'
     };
 
     await db.prepare(`
-      INSERT OR IGNORE INTO research_source_reviews
+      INSERT INTO research_source_reviews
         (source_id, research_id, publisher_class, relevance_score, relevance_band, metadata, flags, status)
-      VALUES (?, ?, ?, ?, ?, ?, ?, 'screened_unverified')
+      VALUES (?, ?, ?, ?, ?, ?, ?, 'screened_v2_unverified')
+      ON CONFLICT(source_id) DO UPDATE SET
+        publisher_class = excluded.publisher_class,
+        relevance_score = excluded.relevance_score,
+        relevance_band = excluded.relevance_band,
+        metadata = excluded.metadata,
+        flags = excluded.flags,
+        status = 'screened_v2_unverified',
+        reviewed_at = CURRENT_TIMESTAMP
     `).bind(
       source.source_id,
       source.research_id,
@@ -4189,6 +4255,14 @@ export default {
           db,
           url
         );
+      }
+
+      if (path === "/research-screen") {
+        const researchId = Number(url.searchParams.get("research_id") || 0);
+        if (!Number.isSafeInteger(researchId) || researchId < 1) {
+          return textResponse("A valid research_id is required.", 400);
+        }
+        return json(await handleAutonomousResearchReview(db, researchId));
       }
 
       if (path === "/research-source-reviews") {
