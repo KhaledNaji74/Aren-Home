@@ -3603,7 +3603,7 @@ function researchTopicFit(topic, title, body) {
   };
 }
 
-async function handleAutonomousResearchReview(db, researchId = 0) {
+async function handleAutonomousResearchReview(db, researchId = 0, forceRescreen = false) {
   const pending = await db.prepare(`
     SELECT s.id AS source_id, s.research_id, s.source_url, s.source_host,
            s.content_type, s.content, r.question
@@ -3612,10 +3612,10 @@ async function handleAutonomousResearchReview(db, researchId = 0) {
     LEFT JOIN research_source_reviews v ON v.source_id = s.id
     WHERE r.research_kind = 'self_directed'
       AND (? = 0 OR s.research_id = ?)
-      AND (v.id IS NULL OR v.status != 'screened_v2_unverified')
+      AND (? = 1 OR v.id IS NULL OR v.status != 'screened_v2_unverified')
     ORDER BY s.id ASC
     LIMIT 100
-  `).bind(researchId, researchId).all();
+  `).bind(researchId, researchId, forceRescreen ? 1 : 0).all();
 
   const reviewed = [];
   for (const source of (pending.results || [])) {
@@ -4262,7 +4262,7 @@ export default {
         if (!Number.isSafeInteger(researchId) || researchId < 1) {
           return textResponse("A valid research_id is required.", 400);
         }
-        return json(await handleAutonomousResearchReview(db, researchId));
+        return json(await handleAutonomousResearchReview(db, researchId, true));
       }
 
       if (path === "/research-source-reviews") {
