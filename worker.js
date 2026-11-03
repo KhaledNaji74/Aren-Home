@@ -359,6 +359,23 @@ async function ensureTables(db) {
     )
   `).run();
 
+  // Evidence assessments are an auditable research layer; they never mutate lessons or principles.
+  await db.prepare(`
+    CREATE TABLE IF NOT EXISTS research_source_assessments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      research_id INTEGER NOT NULL,
+      source_id INTEGER NOT NULL,
+      lesson_id INTEGER NOT NULL,
+      assessment TEXT NOT NULL CHECK (assessment IN ('supports', 'challenges', 'insufficient', 'not_relevant')),
+      evidence_excerpt TEXT,
+      reasoning TEXT NOT NULL,
+      limitation TEXT,
+      source_locator TEXT,
+      confidence INTEGER NOT NULL DEFAULT 1 CHECK (confidence BETWEEN 1 AND 5),
+      created DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `).run();
+
   await db.prepare(`
     CREATE TABLE IF NOT EXISTS lesson_challenges (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -3740,6 +3757,130 @@ async function handleResearchSourceReviews(db, url) {
   });
 }
 
+async function handleResearchSourceAssessment(db, request) {
+  if (request.method !== "POST") {
+    return textResponse("Use POST with a JSON body to record an evidence assessment.", 405);
+  }
+
+  let input;
+  try {
+    input = await request.json();
+  } catch (_) {
+    return textResponse("Request body must be valid JSON.", 400);
+  }
+
+  const researchId = Number(input.research_id);
+  const sourceId = Number(input.source_id);
+  const lessonId = Number(input.lesson_id);
+  const assessment = cleanText(input.assessment).toLowerCase();
+  const evidenceExcerpt = cleanText(input.evidence_excerpt || "");
+  const reasoning = cleanText(input.reasoning || "");
+  const limitation = cleanText(input.limitation || "");
+  const sourceLocator = cleanText(input.source_locator || "");
+  const confidence = Number(input.confidence || 1);
+
+  if (!Number.isSafeInteger(researchId) || researchId < 1 ||
+      !Number.isSafeInteger(sourceId) || sourceId < 1 ||
+      !Number.isSafeInteger(lessonId) || lessonId < 1) {
+    return textResponse("research_id, source_id, and lesson_id must be positive integers.", 400);
+  }
+  if (!["supports", "challenges", "insufficient", "not_relevant"].includes(assessment)) {
+    return textResponse("assessment must be supports, challenges, insufficient, or not_relevant.", 400);
+  }
+  if (!reasoning || reasoning.length < 10 || reasoning.length > 5000) {
+    return textResponse("reasoning is required and must be 10 to 5000 characters.", 400);
+  }
+  if (["supports", "challenges"].includes(assessment) && evidenceExcerpt.length < 10) {
+    return textResponse("A source excerpt is required when classifying evidence as supports or challenges.", 400);
+  }
+  if (evidenceExcerpt.length > 10000 || limitation.length > 3000 || sourceLocator.length > 1000) {
+    return textResponse("Excerpt, limitation, or source locator exceeds the allowed length.", 400);
+  }
+  if (!Number.isInteger(confidence) || confidence < 1 || confidence > 5) {
+    return textResponse("confidence must be an integer from 1 to 5.", 400);
+  }
+
+  const research = await db.prepare(
+    "SELECT id, target_memory_id FROM research WHERE id = ?"
+  ).bind(researchId).first();
+  if (!research) return textResponse("Research not found.", 404);
+
+  const source = await db.prepare(
+    "SELECT id, research_id, status FROM research_sources WHERE id = ? AND research_id = ?"
+  ).bind(sourceId, researchId).first();
+  if (!source) return textResponse("Source not found for this research.", 404);
+
+  const lesson = await getMemoryById(db, lessonId);
+  if (!lesson || lesson.type !== "lesson") {
+    return textResponse("Target memory must be an existing lesson.", 400);
+  }
+  if (research.target_memory_id && Number(research.target_memory_id) !== lessonId) {
+    return textResponse("The selected lesson does not match this research question's linked lesson.", 409);
+  }
+
+  const inserted = await db.prepare(`
+    INSERT INTO research_source_assessments
+      (research_id, source_id, lesson_id, assessment, evidence_excerpt, reasoning,
+       limitation, source_locator, confidence)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).bind(
+    researchId,
+    sourceId,
+    lessonId,
+    assessment,
+    evidenceExcerpt || null,
+    reasoning,
+    limitation || null,
+    sourceLocator || null,
+    confidence
+  ).run();
+
+  return json({
+    status: "Evidence assessment recorded.",
+    assessment_id: inserted.meta?.last_row_id || null,
+    research_id: researchId,
+    source_id: sourceId,
+    lesson_id: lessonId,
+    assessment,
+    confidence,
+    source_status_unchanged: source.status,
+    lesson_changed: false,
+    principle_changed: false,
+    rule: "This records an auditable assessment only. It does not verify the source or alter lesson evidence counts, maturity, memories, or principles."
+  });
+}
+
+async function handleResearchSourceAssessments(db, url) {
+  const researchId = Number(url.searchParams.get("research_id") || 0);
+  const sourceId = Number(url.searchParams.get("source_id") || 0);
+  if ((researchId && (!Number.isSafeInteger(researchId) || researchId < 1)) ||
+      (sourceId && (!Number.isSafeInteger(sourceId) || sourceId < 1))) {
+    return textResponse("Invalid research_id or source_id.", 400);
+  }
+  if (!researchId && !sourceId) {
+    return textResponse("Provide research_id or source_id.", 400);
+  }
+
+  const rows = await db.prepare(`
+    SELECT a.*, s.source_url, s.source_host, s.status AS source_status,
+           r.question, m.text AS lesson_text
+    FROM research_source_assessments a
+    INNER JOIN research_sources s ON s.id = a.source_id
+    INNER JOIN research r ON r.id = a.research_id
+    INNER JOIN memories m ON m.id = a.lesson_id
+    WHERE (? = 0 OR a.research_id = ?)
+      AND (? = 0 OR a.source_id = ?)
+    ORDER BY a.id ASC
+  `).bind(researchId, researchId, sourceId, sourceId).all();
+
+  return json({
+    status: "Evidence assessments retrieved.",
+    assessment_count: rows.results?.length || 0,
+    assessments: rows.results || [],
+    rule: "Assessments are recorded interpretations, not automatic verification or changes to Aren's lessons or principles."
+  });
+}
+
 async function handleResearchSources(db, url) {
   const researchId = Number(url.searchParams.get("research_id") || 0);
   if (!researchId) return textResponse("Missing research_id", 400);
@@ -3784,6 +3925,7 @@ async function handleHealth(db) {
     "research_sources",
     "research_discovery_runs",
     "research_source_reviews",
+    "research_source_assessments",
     "schema_migrations"
   ];
 
@@ -4267,6 +4409,14 @@ export default {
 
       if (path === "/research-source-reviews") {
         return await handleResearchSourceReviews(db, url);
+      }
+
+      if (path === "/research-source-assessments") {
+        return await handleResearchSourceAssessments(db, url);
+      }
+
+      if (path === "/research-assess") {
+        return await handleResearchSourceAssessment(db, request);
       }
 
       if (path === "/research-sources") {
