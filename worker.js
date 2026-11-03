@@ -3957,6 +3957,77 @@ async function handleResearchSourceAssessments(db, url) {
   });
 }
 
+function escapeResearchHtml(value) {
+  return String(value ?? "").replace(/[&<>"']/g, character => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;"
+  })[character]);
+}
+
+async function handleResearchSource(db, url) {
+  const sourceId = Number(url.searchParams.get("source_id") || 0);
+  if (!Number.isSafeInteger(sourceId) || sourceId < 1) {
+    return textResponse("Missing or invalid source_id", 400);
+  }
+
+  const source = await db.prepare(`
+    SELECT s.id, s.research_id, s.source_url, s.source_host, s.content_type,
+           s.content, s.status, s.fetched_at, r.question
+    FROM research_sources s
+    INNER JOIN research r ON r.id = s.research_id
+    WHERE s.id = ?
+    LIMIT 1
+  `).bind(sourceId).first();
+
+  if (!source) return textResponse("Research source not found.", 404);
+
+  let displayContent = String(source.content || "");
+  try {
+    const parsed = JSON.parse(displayContent);
+    displayContent = typeof parsed === "string"
+      ? parsed
+      : JSON.stringify(parsed, null, 2);
+  } catch (_) {
+    // Saved source text is not necessarily JSON; display it unchanged.
+  }
+
+  const safeContent = escapeResearchHtml(displayContent);
+  const safeQuestion = escapeResearchHtml(source.question);
+  const safeUrl = escapeResearchHtml(source.source_url);
+  const safeHost = escapeResearchHtml(source.source_host);
+  const safeFetched = escapeResearchHtml(source.fetched_at);
+  const safeType = escapeResearchHtml(source.content_type);
+  const safeStatus = escapeResearchHtml(source.status);
+
+  return new Response(`<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Aren — Research Source ${source.id}</title>
+<style>
+body{font-family:Arial,sans-serif;max-width:900px;margin:32px auto;padding:0 18px;line-height:1.5;color:#202124}
+h1{margin-bottom:6px} .muted{color:#5f6368;font-size:14px}
+.meta{background:#f4f5f6;padding:14px;border-radius:8px;margin:18px 0;overflow-wrap:anywhere}
+pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f7f7f7;border:1px solid #ddd;border-radius:8px;padding:16px;font:14px/1.55 Consolas,monospace}
+a{color:#1558a6}
+</style>
+</head>
+<body>
+<h1>Aren — Research Source ${source.id}</h1>
+<p class="muted">Saved source content. This is unverified material, not an established fact.</p>
+<div class="meta">
+<p><strong>Research question:</strong> ${safeQuestion}</p>
+<p><strong>Source:</strong> <a href="${safeUrl}" target="_blank" rel="noopener noreferrer">${safeHost}</a></p>
+<p><strong>Status:</strong> ${safeStatus} · <strong>Content type:</strong> ${safeType}</p>
+<p><strong>Saved:</strong> ${safeFetched}</p>
+</div>
+<h2>Saved text / abstract</h2>
+<pre>${safeContent || "No saved source text is available."}</pre>
+<p><a href="/research-sources?research_id=${source.research_id}">Back to source list</a> · <a href="/research-assessment?research_id=${source.research_id}">Open evidence assessment</a></p>
+</body>
+</html>`, {headers:{"content-type":"text/html; charset=UTF-8"}});
+}
+
 async function handleResearchSources(db, url) {
   const researchId = Number(url.searchParams.get("research_id") || 0);
   if (!researchId) return textResponse("Missing research_id", 400);
@@ -3974,7 +4045,10 @@ async function handleResearchSources(db, url) {
     ORDER BY id ASC
   `).bind(researchId).all();
 
-  const sources = result.results || [];
+  const sources = (result.results || []).map(source => ({
+    ...source,
+    source_view_url: "/research-source?source_id=" + source.id
+  }));
   return json({
     status: "Research sources retrieved.",
     research,
@@ -4502,6 +4576,10 @@ export default {
 
       if (path === "/research-assess") {
         return await handleResearchSourceAssessment(db, request);
+      }
+
+      if (path === "/research-source") {
+        return await handleResearchSource(db, url);
       }
 
       if (path === "/research-sources") {
