@@ -3757,6 +3757,82 @@ async function handleResearchSourceReviews(db, url) {
   });
 }
 
+function researchAssessmentPage(url) {
+  const researchId = Number(url.searchParams.get("research_id") || 1);
+  const safeResearchId = Number.isSafeInteger(researchId) && researchId > 0 ? researchId : 1;
+  return new Response(`<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Aren — Evidence Assessment</title>
+<style>
+body{font-family:Arial,sans-serif;max-width:760px;margin:32px auto;padding:0 18px;line-height:1.5;color:#202124}
+h1{margin-bottom:4px} .muted{color:#5f6368;font-size:14px}
+label{display:block;font-weight:600;margin:14px 0 5px}
+input,select,textarea{box-sizing:border-box;width:100%;padding:10px;border:1px solid #bbb;border-radius:6px;font:inherit}
+textarea{min-height:90px} button{margin-top:18px;padding:11px 18px;border:0;border-radius:6px;background:#202124;color:white;font-weight:600;cursor:pointer}
+#result{white-space:pre-wrap;background:#f3f4f6;padding:12px;border-radius:6px;margin-top:18px;display:none}
+.note{background:#f7f7f7;padding:12px;border-left:3px solid #777;margin:16px 0}
+</style>
+</head>
+<body>
+<h1>Aren — Evidence Assessment</h1>
+<p class="muted">Record what a source actually says and how it relates to one lesson.</p>
+<div class="note"><strong>Important:</strong> This records an assessment only. It does not verify the source or change a lesson, memory, evidence count, maturity, or principle.</div>
+<form id="assessmentForm">
+<label for="research_id">Research ID</label>
+<input id="research_id" name="research_id" type="number" min="1" value="${safeResearchId}" required>
+<label for="source_id">Source ID</label>
+<input id="source_id" name="source_id" type="number" min="1" placeholder="Example: 19" required>
+<label for="lesson_id">Lesson ID</label>
+<input id="lesson_id" name="lesson_id" type="number" min="1" placeholder="Example: 3" required>
+<label for="assessment">Assessment</label>
+<select id="assessment" name="assessment" required>
+<option value="insufficient">Insufficient evidence — relevant, but cannot support or challenge</option>
+<option value="supports">Supports the lesson</option>
+<option value="challenges">Challenges the lesson</option>
+<option value="not_relevant">Not relevant to the lesson</option>
+</select>
+<label for="evidence_excerpt">Exact source excerpt (required for supports/challenges)</label>
+<textarea id="evidence_excerpt" name="evidence_excerpt" placeholder="Paste the passage that supports your assessment."></textarea>
+<label for="reasoning">Reasoning</label>
+<textarea id="reasoning" name="reasoning" minlength="10" maxlength="5000" required placeholder="Explain what the passage demonstrates and why it relates to the lesson."></textarea>
+<label for="limitation">Limitations / uncertainty</label>
+<textarea id="limitation" name="limitation" maxlength="3000" placeholder="For example: small sample, different population, indirect evidence, or conflicting findings."></textarea>
+<label for="source_locator">Page, section, paragraph, or DOI</label>
+<input id="source_locator" name="source_locator" maxlength="1000" placeholder="Where the excerpt can be found">
+<label for="confidence">Assessment confidence (1–5)</label>
+<select id="confidence" name="confidence">
+<option value="1">1 — very low</option><option value="2">2 — low</option><option value="3" selected>3 — moderate</option><option value="4">4 — high</option><option value="5">5 — very high</option>
+</select>
+<button type="submit">Save assessment</button>
+</form>
+<pre id="result"></pre>
+<p class="muted"><a href="/research-sources?research_id=${safeResearchId}">View source IDs for this research</a> · <a href="/research-source-assessments?research_id=${safeResearchId}">View saved assessments</a></p>
+<script>
+const form=document.getElementById("assessmentForm");
+const result=document.getElementById("result");
+const assessment=document.getElementById("assessment");
+const excerpt=document.getElementById("evidence_excerpt");
+function updateExcerpt(){excerpt.required=["supports","challenges"].includes(assessment.value);}
+assessment.addEventListener("change",updateExcerpt);updateExcerpt();
+form.addEventListener("submit",async event=>{
+ event.preventDefault();
+ const data=Object.fromEntries(new FormData(form).entries());
+ for(const key of ["research_id","source_id","lesson_id","confidence"])data[key]=Number(data[key]);
+ result.style.display="block";result.textContent="Saving…";
+ try{
+  const response=await fetch("/research-assess",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(data)});
+  const body=await response.json();
+  result.textContent=JSON.stringify(body,null,2);
+ }catch(error){result.textContent="Could not save: "+String(error);}
+});
+</script>
+</body>
+</html>`, {headers:{"content-type":"text/html; charset=UTF-8"}});
+}
+
 async function handleResearchSourceAssessment(db, request) {
   if (request.method !== "POST") {
     return textResponse("Use POST with a JSON body to record an evidence assessment.", 405);
@@ -3962,13 +4038,18 @@ async function handleBackup(db) {
     SELECT * FROM memory_history ORDER BY id ASC
   `).all();
 
+  const researchSourceAssessments = await db.prepare(`
+    SELECT * FROM research_source_assessments ORDER BY id ASC
+  `).all();
+
   return json({
     backup_version: 1,
     created_at: new Date().toISOString(),
     source: "Aren-DB",
     memories: memories.results || [],
     judgments: judgments.results || [],
-    memory_history: memoryHistory.results || []
+    memory_history: memoryHistory.results || [],
+    research_source_assessments: researchSourceAssessments.results || []
   });
 }
 
@@ -4413,6 +4494,10 @@ export default {
 
       if (path === "/research-source-assessments") {
         return await handleResearchSourceAssessments(db, url);
+      }
+
+      if (path === "/research-assessment") {
+        return researchAssessmentPage(url);
       }
 
       if (path === "/research-assess") {
