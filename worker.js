@@ -3582,7 +3582,7 @@ function researchTopicFit(topic, title, body) {
   }
 
   const has = (text, terms) => {
-    const words = new Set(text.split(/\\s+/).filter(Boolean));
+    const words = new Set(text.split(/\s+/).filter(Boolean));
     return terms.some(term => words.has(term));
   };
 
