@@ -359,6 +359,23 @@ async function ensureTables(db) {
     )
   `).run();
 
+  // Evidence assessments are an auditable research layer; they never mutate lessons or principles.
+  await db.prepare(`
+    CREATE TABLE IF NOT EXISTS research_source_assessments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      research_id INTEGER NOT NULL,
+      source_id INTEGER NOT NULL,
+      lesson_id INTEGER NOT NULL,
+      assessment TEXT NOT NULL CHECK (assessment IN ('supports', 'challenges', 'insufficient', 'not_relevant')),
+      evidence_excerpt TEXT,
+      reasoning TEXT NOT NULL,
+      limitation TEXT,
+      source_locator TEXT,
+      confidence INTEGER NOT NULL DEFAULT 1 CHECK (confidence BETWEEN 1 AND 5),
+      created DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `).run();
+
   await db.prepare(`
     CREATE TABLE IF NOT EXISTS lesson_challenges (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -3740,6 +3757,206 @@ async function handleResearchSourceReviews(db, url) {
   });
 }
 
+function researchAssessmentPage(url) {
+  const researchId = Number(url.searchParams.get("research_id") || 1);
+  const safeResearchId = Number.isSafeInteger(researchId) && researchId > 0 ? researchId : 1;
+  return new Response(`<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Aren — Evidence Assessment</title>
+<style>
+body{font-family:Arial,sans-serif;max-width:760px;margin:32px auto;padding:0 18px;line-height:1.5;color:#202124}
+h1{margin-bottom:4px} .muted{color:#5f6368;font-size:14px}
+label{display:block;font-weight:600;margin:14px 0 5px}
+input,select,textarea{box-sizing:border-box;width:100%;padding:10px;border:1px solid #bbb;border-radius:6px;font:inherit}
+textarea{min-height:90px} button{margin-top:18px;padding:11px 18px;border:0;border-radius:6px;background:#202124;color:white;font-weight:600;cursor:pointer}
+#result{white-space:pre-wrap;background:#f3f4f6;padding:12px;border-radius:6px;margin-top:18px;display:none}
+.note{background:#f7f7f7;padding:12px;border-left:3px solid #777;margin:16px 0}
+</style>
+</head>
+<body>
+<h1>Aren — Evidence Assessment</h1>
+<p class="muted">Record what a source actually says and how it relates to one lesson.</p>
+<div class="note"><strong>Important:</strong> This records an assessment only. It does not verify the source or change a lesson, memory, evidence count, maturity, or principle.</div>
+<form id="assessmentForm">
+<label for="research_id">Research ID</label>
+<input id="research_id" name="research_id" type="number" min="1" value="${safeResearchId}" required>
+<label for="source_id">Source ID</label>
+<input id="source_id" name="source_id" type="number" min="1" placeholder="Example: 19" required>
+<label for="lesson_id">Lesson ID</label>
+<input id="lesson_id" name="lesson_id" type="number" min="1" placeholder="Example: 3" required>
+<label for="assessment">Assessment</label>
+<select id="assessment" name="assessment" required>
+<option value="insufficient">Insufficient evidence — relevant, but cannot support or challenge</option>
+<option value="supports">Supports the lesson</option>
+<option value="challenges">Challenges the lesson</option>
+<option value="not_relevant">Not relevant to the lesson</option>
+</select>
+<label for="evidence_excerpt">Exact source excerpt (required for supports/challenges)</label>
+<textarea id="evidence_excerpt" name="evidence_excerpt" placeholder="Paste the passage that supports your assessment."></textarea>
+<label for="reasoning">Reasoning</label>
+<textarea id="reasoning" name="reasoning" minlength="10" maxlength="5000" required placeholder="Explain what the passage demonstrates and why it relates to the lesson."></textarea>
+<label for="limitation">Limitations / uncertainty</label>
+<textarea id="limitation" name="limitation" maxlength="3000" placeholder="For example: small sample, different population, indirect evidence, or conflicting findings."></textarea>
+<label for="source_locator">Page, section, paragraph, or DOI</label>
+<input id="source_locator" name="source_locator" maxlength="1000" placeholder="Where the excerpt can be found">
+<label for="confidence">Assessment confidence (1–5)</label>
+<select id="confidence" name="confidence">
+<option value="1">1 — very low</option><option value="2">2 — low</option><option value="3" selected>3 — moderate</option><option value="4">4 — high</option><option value="5">5 — very high</option>
+</select>
+<button type="submit">Save assessment</button>
+</form>
+<pre id="result"></pre>
+<p class="muted"><a href="/research-sources?research_id=${safeResearchId}">View source IDs for this research</a> · <a href="/research-source-assessments?research_id=${safeResearchId}">View saved assessments</a></p>
+<script>
+const form=document.getElementById("assessmentForm");
+const result=document.getElementById("result");
+const assessment=document.getElementById("assessment");
+const excerpt=document.getElementById("evidence_excerpt");
+function updateExcerpt(){excerpt.required=["supports","challenges"].includes(assessment.value);}
+assessment.addEventListener("change",updateExcerpt);updateExcerpt();
+form.addEventListener("submit",async event=>{
+ event.preventDefault();
+ const data=Object.fromEntries(new FormData(form).entries());
+ for(const key of ["research_id","source_id","lesson_id","confidence"])data[key]=Number(data[key]);
+ result.style.display="block";result.textContent="Saving…";
+ try{
+  const response=await fetch("/research-assess",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(data)});
+  const body=await response.json();
+  result.textContent=JSON.stringify(body,null,2);
+ }catch(error){result.textContent="Could not save: "+String(error);}
+});
+</script>
+</body>
+</html>`, {headers:{"content-type":"text/html; charset=UTF-8"}});
+}
+
+async function handleResearchSourceAssessment(db, request) {
+  if (request.method !== "POST") {
+    return textResponse("Use POST with a JSON body to record an evidence assessment.", 405);
+  }
+
+  let input;
+  try {
+    input = await request.json();
+  } catch (_) {
+    return textResponse("Request body must be valid JSON.", 400);
+  }
+
+  const researchId = Number(input.research_id);
+  const sourceId = Number(input.source_id);
+  const lessonId = Number(input.lesson_id);
+  const assessment = cleanText(input.assessment).toLowerCase();
+  const evidenceExcerpt = cleanText(input.evidence_excerpt || "");
+  const reasoning = cleanText(input.reasoning || "");
+  const limitation = cleanText(input.limitation || "");
+  const sourceLocator = cleanText(input.source_locator || "");
+  const confidence = Number(input.confidence || 1);
+
+  if (!Number.isSafeInteger(researchId) || researchId < 1 ||
+      !Number.isSafeInteger(sourceId) || sourceId < 1 ||
+      !Number.isSafeInteger(lessonId) || lessonId < 1) {
+    return textResponse("research_id, source_id, and lesson_id must be positive integers.", 400);
+  }
+  if (!["supports", "challenges", "insufficient", "not_relevant"].includes(assessment)) {
+    return textResponse("assessment must be supports, challenges, insufficient, or not_relevant.", 400);
+  }
+  if (!reasoning || reasoning.length < 10 || reasoning.length > 5000) {
+    return textResponse("reasoning is required and must be 10 to 5000 characters.", 400);
+  }
+  if (["supports", "challenges"].includes(assessment) && evidenceExcerpt.length < 10) {
+    return textResponse("A source excerpt is required when classifying evidence as supports or challenges.", 400);
+  }
+  if (evidenceExcerpt.length > 10000 || limitation.length > 3000 || sourceLocator.length > 1000) {
+    return textResponse("Excerpt, limitation, or source locator exceeds the allowed length.", 400);
+  }
+  if (!Number.isInteger(confidence) || confidence < 1 || confidence > 5) {
+    return textResponse("confidence must be an integer from 1 to 5.", 400);
+  }
+
+  const research = await db.prepare(
+    "SELECT id, target_memory_id FROM research WHERE id = ?"
+  ).bind(researchId).first();
+  if (!research) return textResponse("Research not found.", 404);
+
+  const source = await db.prepare(
+    "SELECT id, research_id, status FROM research_sources WHERE id = ? AND research_id = ?"
+  ).bind(sourceId, researchId).first();
+  if (!source) return textResponse("Source not found for this research.", 404);
+
+  const lesson = await getMemoryById(db, lessonId);
+  if (!lesson || lesson.type !== "lesson") {
+    return textResponse("Target memory must be an existing lesson.", 400);
+  }
+  if (research.target_memory_id && Number(research.target_memory_id) !== lessonId) {
+    return textResponse("The selected lesson does not match this research question's linked lesson.", 409);
+  }
+
+  const inserted = await db.prepare(`
+    INSERT INTO research_source_assessments
+      (research_id, source_id, lesson_id, assessment, evidence_excerpt, reasoning,
+       limitation, source_locator, confidence)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).bind(
+    researchId,
+    sourceId,
+    lessonId,
+    assessment,
+    evidenceExcerpt || null,
+    reasoning,
+    limitation || null,
+    sourceLocator || null,
+    confidence
+  ).run();
+
+  return json({
+    status: "Evidence assessment recorded.",
+    assessment_id: inserted.meta?.last_row_id || null,
+    research_id: researchId,
+    source_id: sourceId,
+    lesson_id: lessonId,
+    assessment,
+    confidence,
+    source_status_unchanged: source.status,
+    lesson_changed: false,
+    principle_changed: false,
+    rule: "This records an auditable assessment only. It does not verify the source or alter lesson evidence counts, maturity, memories, or principles."
+  });
+}
+
+async function handleResearchSourceAssessments(db, url) {
+  const researchId = Number(url.searchParams.get("research_id") || 0);
+  const sourceId = Number(url.searchParams.get("source_id") || 0);
+  if ((researchId && (!Number.isSafeInteger(researchId) || researchId < 1)) ||
+      (sourceId && (!Number.isSafeInteger(sourceId) || sourceId < 1))) {
+    return textResponse("Invalid research_id or source_id.", 400);
+  }
+  if (!researchId && !sourceId) {
+    return textResponse("Provide research_id or source_id.", 400);
+  }
+
+  const rows = await db.prepare(`
+    SELECT a.*, s.source_url, s.source_host, s.status AS source_status,
+           r.question, m.text AS lesson_text
+    FROM research_source_assessments a
+    INNER JOIN research_sources s ON s.id = a.source_id
+    INNER JOIN research r ON r.id = a.research_id
+    INNER JOIN memories m ON m.id = a.lesson_id
+    WHERE (? = 0 OR a.research_id = ?)
+      AND (? = 0 OR a.source_id = ?)
+    ORDER BY a.id ASC
+  `).bind(researchId, researchId, sourceId, sourceId).all();
+
+  return json({
+    status: "Evidence assessments retrieved.",
+    assessment_count: rows.results?.length || 0,
+    assessments: rows.results || [],
+    rule: "Assessments are recorded interpretations, not automatic verification or changes to Aren's lessons or principles."
+  });
+}
+
 async function handleResearchSources(db, url) {
   const researchId = Number(url.searchParams.get("research_id") || 0);
   if (!researchId) return textResponse("Missing research_id", 400);
@@ -3784,6 +4001,7 @@ async function handleHealth(db) {
     "research_sources",
     "research_discovery_runs",
     "research_source_reviews",
+    "research_source_assessments",
     "schema_migrations"
   ];
 
@@ -3820,13 +4038,18 @@ async function handleBackup(db) {
     SELECT * FROM memory_history ORDER BY id ASC
   `).all();
 
+  const researchSourceAssessments = await db.prepare(`
+    SELECT * FROM research_source_assessments ORDER BY id ASC
+  `).all();
+
   return json({
     backup_version: 1,
     created_at: new Date().toISOString(),
     source: "Aren-DB",
     memories: memories.results || [],
     judgments: judgments.results || [],
-    memory_history: memoryHistory.results || []
+    memory_history: memoryHistory.results || [],
+    research_source_assessments: researchSourceAssessments.results || []
   });
 }
 
@@ -4267,6 +4490,18 @@ export default {
 
       if (path === "/research-source-reviews") {
         return await handleResearchSourceReviews(db, url);
+      }
+
+      if (path === "/research-source-assessments") {
+        return await handleResearchSourceAssessments(db, url);
+      }
+
+      if (path === "/research-assessment") {
+        return researchAssessmentPage(url);
+      }
+
+      if (path === "/research-assess") {
+        return await handleResearchSourceAssessment(db, request);
       }
 
       if (path === "/research-sources") {
