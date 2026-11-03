@@ -3603,7 +3603,7 @@ function researchTopicFit(topic, title, body) {
   };
 }
 
-async function handleAutonomousResearchReview(db) {
+async function handleAutonomousResearchReview(db, researchId = 0) {
   const pending = await db.prepare(`
     SELECT s.id AS source_id, s.research_id, s.source_url, s.source_host,
            s.content_type, s.content, r.question
@@ -3611,10 +3611,11 @@ async function handleAutonomousResearchReview(db) {
     INNER JOIN research r ON r.id = s.research_id
     LEFT JOIN research_source_reviews v ON v.source_id = s.id
     WHERE r.research_kind = 'self_directed'
-      AND v.id IS NULL
+      AND (? = 0 OR s.research_id = ?)
+      AND (v.id IS NULL OR v.status != 'screened_v2_unverified')
     ORDER BY s.id ASC
-    LIMIT 6
-  `).all();
+    LIMIT 100
+  `).bind(researchId, researchId).all();
 
   const reviewed = [];
   for (const source of (pending.results || [])) {
@@ -3681,13 +3682,21 @@ async function handleAutonomousResearchReview(db) {
       relevance_band: relevanceBand,
       metadata,
       flags,
-      status: 'screened_unverified'
+      status: 'screened_v2_unverified'
     };
 
     await db.prepare(`
       INSERT OR IGNORE INTO research_source_reviews
         (source_id, research_id, publisher_class, relevance_score, relevance_band, metadata, flags, status)
-      VALUES (?, ?, ?, ?, ?, ?, ?, 'screened_unverified')
+      VALUES (?, ?, ?, ?, ?, ?, ?, 'screened_v2_unverified')
+      ON CONFLICT(source_id) DO UPDATE SET
+        publisher_class = excluded.publisher_class,
+        relevance_score = excluded.relevance_score,
+        relevance_band = excluded.relevance_band,
+        metadata = excluded.metadata,
+        flags = excluded.flags,
+        status = 'screened_v2_unverified',
+        reviewed_at = CURRENT_TIMESTAMP
     `).bind(
       source.source_id,
       source.research_id,
@@ -4246,6 +4255,14 @@ export default {
           db,
           url
         );
+      }
+
+      if (path === "/research-screen") {
+        const researchId = Number(url.searchParams.get("research_id") || 0);
+        if (!Number.isSafeInteger(researchId) || researchId < 1) {
+          return textResponse("A valid research_id is required.", 400);
+        }
+        return json(await handleAutonomousResearchReview(db, researchId));
       }
 
       if (path === "/research-source-reviews") {
