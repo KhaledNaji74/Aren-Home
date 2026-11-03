@@ -3581,9 +3581,10 @@ function researchTopicFit(topic, title, body) {
     groups = [tokenize(topic).filter(word => word.length >= 6).slice(0, 4)];
   }
 
-  const has = (text, terms) => terms.some(term =>
-    new RegExp('(^|[^a-z0-9])' + term.replace(/[.*+?^${}()|[\]\\]/g, '\\async function handleAutonomousResearchReview(db) {') + '([^a-z0-9]|$)', 'i').test(text)
-  );
+  const has = (text, terms) => {
+    const words = new Set(text.split(/\\s+/).filter(Boolean));
+    return terms.some(term => words.has(term));
+  };
 
   const matched = groups.filter(group => group.length && has(fullText, group));
   const titleAnchor = groups.some(group => group.length && has(titleText, group));
