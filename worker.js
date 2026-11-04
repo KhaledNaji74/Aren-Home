@@ -3583,11 +3583,13 @@ function researchTopicFit(topic, title, body) {
   const titleText = normalize(title);
   const fullText = normalize(title + ' ' + body);
   let groups;
+  const preservationLessonTopic = /preserve|preservation|retain|retention|lesson|experience|experiential/.test(t);
 
-  if (/preserve|preservation|retain|retention|lesson|experience|experiential/.test(t)) {
+  if (preservationLessonTopic) {
+    // These dimensions establish broad topical overlap only; they do not prove the proposition.
     groups = [
       ['experience', 'experiential', 'learning', 'learn', 'reflection', 'reflective'],
-      ['memory', 'remember', 'retention', 'preserve', 'preservation', 'retain', 'lesson']
+      ['lesson', 'lessons', 'preserve', 'preservation', 'retain', 'retention', 'knowledge']
     ];
   } else if (/decision|consequence|outcome|impact/.test(t)) {
     groups = [
@@ -3606,20 +3608,38 @@ function researchTopicFit(topic, title, body) {
   const matched = groups.filter(group => group.length && has(fullText, group));
   const titleAnchor = groups.some(group => group.length && has(titleText, group));
   const excludedTitle = /^(list of|category:|characters|episodes)/i.test(title.trim());
+
+  // For this normative lesson, memory/episodic-memory research is only an adjacent mechanism.
+  // Require an explicit experience-to-learning/lesson/retention link before allowing a strong
+  // topical classification. Even then, this is screening only, not proof or verification.
+  const directLessonPhrases = [
+    /lessons? learned from (?:experience|experiences|past experience)/,
+    /learning from (?:experience|experiences|past experience)/,
+    /reflect(?:ion|ive) on (?:past )?experiences?/,
+    /retain(?:ing)? lessons?/,
+    /preserv(?:e|ing|ation of) (?:lessons?|knowledge) from (?:experience|experiences)/,
+    /experience-based learning/,
+    /experiential learning/
+  ];
+  const directEvidenceCandidate = preservationLessonTopic &&
+    directLessonPhrases.some(pattern => pattern.test(fullText));
   const score = groups.length ? matched.length / groups.length : 0;
+  const adjustedScore = excludedTitle ? Math.min(score, 0.1) :
+    preservationLessonTopic && !directEvidenceCandidate ? Math.min(score, 0.35) : score;
 
   return {
-    score: excludedTitle ? Math.min(score, 0.1) : score,
+    score: adjustedScore,
     groups_required: groups.length,
     groups_matched: excludedTitle ? 0 : matched.length,
     missing_groups: groups
       .filter(group => !has(fullText, group))
       .map(group => group.join('/')),
     title_anchor: titleAnchor && !excludedTitle,
-    excluded_title: excludedTitle
+    excluded_title: excludedTitle,
+    direct_evidence_candidate: directEvidenceCandidate,
+    requires_direct_claim_match: preservationLessonTopic
   };
 }
-
 async function handleAutonomousResearchReview(db, researchId = 0, forceRescreen = false) {
   const pending = await db.prepare(`
     SELECT s.id AS source_id, s.research_id, s.source_url, s.source_host,
@@ -3660,11 +3680,17 @@ async function handleAutonomousResearchReview(db, researchId = 0, forceRescreen 
     // A source must cover the topic's specific evidence dimensions.
     const relevance = Number(Math.min(genericScore, topicFit.score).toFixed(6));
     const relevanceBand =
-      topicFit.groups_matched === topicFit.groups_required && topicFit.title_anchor
+      topicFit.groups_matched === topicFit.groups_required &&
+      topicFit.title_anchor &&
+      (!topicFit.requires_direct_claim_match || topicFit.direct_evidence_candidate)
         ? 'strong_topic_overlap'
-        : topicFit.groups_matched > 0
-          ? 'partial_topic_overlap'
-          : 'weak_topic_overlap';
+        : topicFit.requires_direct_claim_match &&
+          topicFit.groups_matched > 0 &&
+          !topicFit.direct_evidence_candidate
+          ? 'indirect_topic_overlap'
+          : topicFit.groups_matched > 0
+            ? 'partial_topic_overlap'
+            : 'weak_topic_overlap';
 
     const flags = [];
     if (topicFit.groups_matched < topicFit.groups_required) {
@@ -3680,6 +3706,12 @@ async function handleAutonomousResearchReview(db, researchId = 0, forceRescreen 
     if (body.length < 250) flags.push('Stored text is short and may be insufficient for assessment.');
     if (!doi && !publicationDate) flags.push('No DOI or publication date metadata found.');
     if (publisherClass === 'unclassified-publisher') flags.push('Publisher type is not classified by this screening rule.');
+    if (topicFit.requires_direct_claim_match && !topicFit.direct_evidence_candidate) {
+      flags.push('Only adjacent topic overlap detected; no explicit experience-to-learning/lesson-preservation link was found. Treat as indirect context, not direct evidence for the lesson.');
+    }
+    if (topicFit.direct_evidence_candidate) {
+      flags.push('A phrase linking experience to learning or lesson retention was detected; this is only a relevance cue and does not establish support, reliability, or verification.');
+    }
     if (relevanceBand === 'weak_topic_overlap') flags.push('Stored text has weak lexical/concept overlap with the research topic.');
 
     const metadata = {
