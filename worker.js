@@ -3674,18 +3674,23 @@ async function handleAutonomousResearchReview(db, researchId = 0, forceRescreen 
     // Generic word overlap is never enough to label a source strongly relevant.
     // A source must cover the topic's specific evidence dimensions.
     const relevance = Number(Math.min(genericScore, topicFit.score).toFixed(6));
-    const relevanceBand =
+    const strongAcademicTopicMatch =
+      publisherClass === 'academic-index' &&
       topicFit.groups_matched === topicFit.groups_required &&
       topicFit.title_anchor &&
-      (!topicFit.requires_direct_claim_match || topicFit.direct_evidence_candidate)
-        ? 'strong_topic_overlap'
-        : topicFit.requires_direct_claim_match &&
-          topicFit.groups_matched > 0 &&
-          !topicFit.direct_evidence_candidate
-          ? 'indirect_topic_overlap'
-          : topicFit.groups_matched > 0
-            ? 'partial_topic_overlap'
-            : 'weak_topic_overlap';
+      (!topicFit.requires_direct_claim_match || topicFit.direct_evidence_candidate);
+    const relevanceBand =
+      publisherClass === 'reference-encyclopedia'
+        ? 'reference_context'
+        : strongAcademicTopicMatch
+          ? 'strong_topic_overlap'
+          : topicFit.requires_direct_claim_match &&
+            topicFit.groups_matched > 0 &&
+            !topicFit.direct_evidence_candidate
+            ? 'indirect_topic_overlap'
+            : topicFit.groups_matched > 0
+              ? 'partial_topic_overlap'
+              : 'weak_topic_overlap';
 
     const flags = [];
     if (topicFit.groups_matched < topicFit.groups_required) {
@@ -3701,6 +3706,12 @@ async function handleAutonomousResearchReview(db, researchId = 0, forceRescreen 
     if (body.length < 250) flags.push('Stored text is short and may be insufficient for assessment.');
     if (!doi && !publicationDate) flags.push('No DOI or publication date metadata found.');
     if (publisherClass === 'unclassified-publisher') flags.push('Publisher type is not classified by this screening rule.');
+    if (publisherClass === 'reference-encyclopedia') {
+      flags.push('Reference encyclopedia content is context only; it cannot receive strong topic relevance or establish evidence.');
+    }
+    if (topicFit.direct_evidence_candidate && publisherClass !== 'academic-index') {
+      flags.push('A direct phrase match in a non-academic reference source is context only; it does not qualify as strong academic topic relevance or evidence.');
+    }
     if (topicFit.requires_direct_claim_match && !topicFit.direct_evidence_candidate) {
       flags.push('Only adjacent topic overlap detected; no explicit experience-to-learning/lesson-preservation link was found. Treat as indirect context, not direct evidence for the lesson.');
     }
