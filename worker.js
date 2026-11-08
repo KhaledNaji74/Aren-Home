@@ -3047,21 +3047,30 @@ async function handleResearchDiscover(db, url) {
     };
   };
 
-  const searchTerms = [searchTerm];
-  if (/lesson|learn|experience|review/i.test(searchTerm)) {
-    searchTerms.push("learning from experience");
+  // Use cross-disciplinary vocabulary for experience-to-learning research.
+  // Targeted terms come first; the original lesson wording remains as a final query.
+  const searchTerms = [];
+  if (isDecisionTopic) {
+    searchTerms.push(
+      "decision making learning from outcomes",
+      "decision feedback learning from outcomes",
+      "after action review decision outcomes",
+      "decision making learning from mistakes",
+      "decision analysis outcome evaluation"
+    );
+  } else {
+    searchTerms.push(
+      "experiential learning knowledge retention",
+      "lessons learned organizational learning",
+      "after action review lessons learned",
+      "reflective practice experience retention",
+      "debriefing knowledge capture",
+      "post incident review organizational learning",
+      "experience based learning knowledge transfer"
+    );
   }
-  if (/preserv|retain|memory|remember/i.test(searchTerm)) {
-    searchTerms.push("memory retention learning");
-  }
-  if (/decision|judgment|consequence|outcome/i.test(searchTerm)) {
-    searchTerms.push("decision making learning from outcomes");
-    searchTerms.push("decision-making consequences outcomes evaluation");
-    searchTerms.push("decision analysis outcome evaluation");
-  }
-  // Keep targeted searches ahead of the broad question so discovery is less dominated
-  // by unrelated results returned for the original phrasing.
-  const uniqueSearchTerms = [...new Set(searchTerms)].slice(0, 5);
+  searchTerms.push(searchTerm);
+  const uniqueSearchTerms = [...new Set(searchTerms)].slice(0, 7);
 
   try {
     const candidateMap = new Map();
@@ -3117,104 +3126,130 @@ async function handleResearchDiscover(db, url) {
       });
     }
 
-    // Search academic indexes directly. Wikipedia results are never stored.
-    // OpenAlex abstracts are reconstructed and must pass a topic-specific gate.
-    const alternativeProvider = { name: "OpenAlex", attempted: false, http_status: null, error: null, candidates_found: 0, sources_saved: 0 };
+    // Search OpenAlex across several targeted terms instead of relying on one query.
+    // OpenAlex is multidisciplinary; every candidate must still pass the strict
+    // title-and-abstract relevance gate before it can be saved.
+    const alternativeProvider = {
+      name: "OpenAlex",
+      attempted: false,
+      http_status: null,
+      error: null,
+      queries_attempted: [],
+      candidates_found: 0,
+      sources_saved: 0
+    };
     if (saved.length < 3) {
       alternativeProvider.attempted = true;
-      try {
-        const openAlexSearchTerm = uniqueSearchTerms.find(term => term !== searchTerm) || searchTerm;
-        alternativeProvider.search_term = openAlexSearchTerm;
-        const openAlexUrl = new URL("https://api.openalex.org/works");
-        openAlexUrl.search = new URLSearchParams({
-          search: openAlexSearchTerm,
-          "per-page": "12",
-          select: "id,doi,title,publication_year,authorships,abstract_inverted_index,type",
-          sort: "relevance_score:desc"
-        }).toString();
-        const openAlexResponse = await fetch(openAlexUrl.toString(), {
-          headers: {
-            "accept": "application/json",
-            "user-agent": "Aren-Home/1.0 (research source discovery)"
-          },
-          signal: AbortSignal.timeout(12000)
-        });
-        alternativeProvider.http_status = openAlexResponse.status;
-        if (!openAlexResponse.ok) {
-          alternativeProvider.error = "OpenAlex HTTP " + openAlexResponse.status;
-        } else {
+      const openAlexWorks = new Map();
+      for (const openAlexSearchTerm of uniqueSearchTerms.slice(0, 6)) {
+        const queryResult = { search_term: openAlexSearchTerm, http_status: null, candidates_found: 0 };
+        alternativeProvider.queries_attempted.push(queryResult);
+        try {
+          const openAlexUrl = new URL("https://api.openalex.org/works");
+          openAlexUrl.search = new URLSearchParams({
+            search: openAlexSearchTerm,
+            "per-page": "15",
+            select: "id,doi,title,publication_year,authorships,abstract_inverted_index,type",
+            sort: "relevance_score:desc"
+          }).toString();
+          const openAlexResponse = await fetch(openAlexUrl.toString(), {
+            headers: {
+              "accept": "application/json",
+              "user-agent": "Aren-Home/1.0 (research source discovery)"
+            },
+            signal: AbortSignal.timeout(12000)
+          });
+          queryResult.http_status = openAlexResponse.status;
+          alternativeProvider.http_status = openAlexResponse.status;
+          if (!openAlexResponse.ok) {
+            alternativeProvider.error = "One or more OpenAlex searches failed.";
+            continue;
+          }
           const openAlexData = await openAlexResponse.json();
           const works = Array.isArray(openAlexData?.results) ? openAlexData.results : [];
-          alternativeProvider.candidates_found = works.length;
+          queryResult.candidates_found = works.length;
           for (const work of works) {
-            if (saved.length >= 3) break;
-            const title = String(work?.title || "").trim();
-            const inverted = work?.abstract_inverted_index;
-            if (!title || !inverted || typeof inverted !== "object") continue;
-            const words = [];
-            for (const [word, positions] of Object.entries(inverted)) {
-              for (const position of (Array.isArray(positions) ? positions : [])) {
-                if (Number.isInteger(position)) words.push([position, word]);
-              }
+            const key = String(work?.id || work?.doi || work?.title || "").trim();
+            if (key && !openAlexWorks.has(key)) {
+              openAlexWorks.set(key, { work, discovery_query: openAlexSearchTerm });
             }
-            words.sort((a, b) => a[0] - b[0]);
-            const abstract = words.map(item => item[1]).join(" ").trim();
-            if (abstract.length < 120) continue;
+          }
+        } catch (error) {
+          queryResult.error = String(error?.message || error);
+          alternativeProvider.error = "One or more OpenAlex searches failed.";
+        }
+      }
 
-            const score = relevanceScore(title, abstract);
-            const academicGate = academicRelevanceGate(score);
-            score.academic_gate = academicGate;
-            if (!academicGate.passed) {
-              skipped.push({
-                title,
-                provider: "OpenAlex",
-                reason: "Rejected: academic title and abstract did not both demonstrate the required topic-specific concepts.",
-                relevance_score: score
-              });
-              continue;
-            }
-
-            const sourceUrl = String(work.id || "").trim();
-            if (!/^https:\/\/openalex\.org\/W\d+$/i.test(sourceUrl)) continue;
-            const existing = await db.prepare(
-              "SELECT id FROM research_sources WHERE research_id = ? AND source_url = ? LIMIT 1"
-            ).bind(researchId, sourceUrl).first();
-            if (existing) {
-              skipped.push({ title, provider: "OpenAlex", reason: "Already attached to this research question." });
-              continue;
-            }
-
-            const authors = (Array.isArray(work.authorships) ? work.authorships : [])
-              .slice(0, 5)
-              .map(item => item?.author?.display_name)
-              .filter(Boolean);
-            const content = [
-              "Title: " + title,
-              work.publication_year ? "Publication year: " + work.publication_year : "",
-              authors.length ? "Authors: " + authors.join("; ") : "",
-              work.doi ? "DOI: " + work.doi : "",
-              "Abstract: " + abstract
-            ].filter(Boolean).join("\n").slice(0, 20000);
-
-            const inserted = await db.prepare(
-              "INSERT INTO research_sources (research_id, source_url, source_host, content_type, content, status) VALUES (?, ?, 'openalex.org', 'application/json', ?, 'unverified')"
-            ).bind(researchId, sourceUrl, content).run();
-            saved.push({
-              source_id: inserted.meta?.last_row_id || null,
-              title,
-              source_url: sourceUrl,
-              doi: work.doi || null,
-              publication_year: work.publication_year || null,
-              provider: "OpenAlex",
-              source_status: "unverified",
-              relevance_score: score,
-              characters_saved: content.length
-            });
-            alternativeProvider.sources_saved++;
+      alternativeProvider.candidates_found = openAlexWorks.size;
+      for (const candidate of openAlexWorks.values()) {
+        if (saved.length >= 3) break;
+        const work = candidate.work;
+        const title = String(work?.title || "").trim();
+        const inverted = work?.abstract_inverted_index;
+        if (!title || !inverted || typeof inverted !== "object") continue;
+        const words = [];
+        for (const [word, positions] of Object.entries(inverted)) {
+          for (const position of (Array.isArray(positions) ? positions : [])) {
+            if (Number.isInteger(position)) words.push([position, word]);
           }
         }
-      } catch (error) {
-        alternativeProvider.error = String(error?.message || error);
+        words.sort((a, b) => a[0] - b[0]);
+        const abstract = words.map(item => item[1]).join(" ").trim();
+        if (abstract.length < 120) continue;
+
+        const score = relevanceScore(title, abstract);
+        const academicGate = academicRelevanceGate(score);
+        score.academic_gate = academicGate;
+        if (!academicGate.passed) {
+          skipped.push({
+            title,
+            provider: "OpenAlex",
+            discovery_query: candidate.discovery_query,
+            reason: "Rejected: academic title and abstract did not both demonstrate the required topic-specific concepts.",
+            relevance_score: score
+          });
+          continue;
+        }
+
+        const sourceUrl = String(work.id || "").trim();
+        if (!/^https:\/\/openalex\.org\/W\d+$/i.test(sourceUrl)) continue;
+        const existing = await db.prepare(
+          "SELECT id FROM research_sources WHERE research_id = ? AND source_url = ? LIMIT 1"
+        ).bind(researchId, sourceUrl).first();
+        if (existing) {
+          skipped.push({ title, provider: "OpenAlex", reason: "Already attached to this research question." });
+          continue;
+        }
+
+        const authors = (Array.isArray(work.authorships) ? work.authorships : [])
+          .slice(0, 5)
+          .map(item => item?.author?.display_name)
+          .filter(Boolean);
+        const content = [
+          "Title: " + title,
+          work.publication_year ? "Publication year: " + work.publication_year : "",
+          authors.length ? "Authors: " + authors.join("; ") : "",
+          work.doi ? "DOI: " + work.doi : "",
+          "Discovery query: " + candidate.discovery_query,
+          "Abstract: " + abstract
+        ].filter(Boolean).join("\n").slice(0, 20000);
+
+        const inserted = await db.prepare(
+          "INSERT INTO research_sources (research_id, source_url, source_host, content_type, content, status) VALUES (?, ?, 'openalex.org', 'application/json', ?, 'unverified')"
+        ).bind(researchId, sourceUrl, content).run();
+        saved.push({
+          source_id: inserted.meta?.last_row_id || null,
+          title,
+          source_url: sourceUrl,
+          doi: work.doi || null,
+          publication_year: work.publication_year || null,
+          provider: "OpenAlex",
+          discovery_query: candidate.discovery_query,
+          source_status: "unverified",
+          relevance_score: score,
+          characters_saved: content.length
+        });
+        alternativeProvider.sources_saved++;
       }
     }
 
