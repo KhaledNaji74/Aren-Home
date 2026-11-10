@@ -236,6 +236,18 @@ async function ensureTables(db) {
   `).run();
 
   await db.prepare(`
+    CREATE TABLE IF NOT EXISTS autonomous_cycle_runs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      trigger TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'running',
+      started_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      completed_at DATETIME,
+      result TEXT,
+      error TEXT
+    )
+  `).run();
+
+  await db.prepare(`
     CREATE TABLE IF NOT EXISTS research (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       question TEXT NOT NULL,
@@ -4132,6 +4144,35 @@ async function handleResearchSources(db, url) {
   });
 }
 
+async function handleAutonomousStatus(db) {
+  const runs = await db.prepare(`
+    SELECT id, trigger, status, started_at, completed_at, error
+    FROM autonomous_cycle_runs
+    ORDER BY id DESC
+    LIMIT 10
+  `).all();
+
+  const taskSummary = await db.prepare(`
+    SELECT status, COUNT(*) AS count
+    FROM development_tasks
+    WHERE id IN (
+      SELECT MAX(id)
+      FROM development_tasks
+      GROUP BY type, COALESCE(target_memory_id, 0), COALESCE(related_memory_id, 0)
+    )
+    GROUP BY status
+  `).all();
+
+  const latest = runs.results?.[0] || null;
+  return json({
+    status: latest?.status === "failed" ? "attention_required" : "available",
+    latest_run: latest,
+    recent_runs: runs.results || [],
+    latest_task_status_counts: taskSummary.results || [],
+    note: "This endpoint reports execution health. A completed cycle does not mean every research source is verified or every lesson is proven."
+  });
+}
+
 async function handleHealth(db) {
   const requiredTables = [
     "memories",
@@ -4305,6 +4346,10 @@ export default {
       const db = env.AREN_DB;
 
       await ensureTables(db);
+
+      if (path === "/autonomous-status") {
+        return await handleAutonomousStatus(db);
+      }
 
       if (path === "/health") {
         return await handleHealth(db);
@@ -4676,13 +4721,41 @@ export default {
   },
 
   async scheduled(event, env, ctx) {
+    if (!env.AREN_DB) return;
+    const db = env.AREN_DB;
+
     try {
-      if (!env.AREN_DB) return;
-      const db = env.AREN_DB;
       await ensureTables(db);
-      await handleAutonomousCycle(db);
-    } catch (_) {
-      // Scheduled development must never crash the Worker runtime.
+      const trigger = "cron:" + String(event?.cron || "scheduled");
+      const inserted = await db.prepare(`
+        INSERT INTO autonomous_cycle_runs (trigger, status)
+        VALUES (?, 'running')
+      `).bind(trigger).run();
+      const runId = inserted.meta?.last_row_id || null;
+
+      try {
+        const response = await handleAutonomousCycle(db);
+        const result = await response.json();
+        await db.prepare(`
+          UPDATE autonomous_cycle_runs
+          SET status = 'completed',
+              completed_at = CURRENT_TIMESTAMP,
+              result = ?
+          WHERE id = ?
+        `).bind(JSON.stringify(result), runId).run();
+      } catch (error) {
+        await db.prepare(`
+          UPDATE autonomous_cycle_runs
+          SET status = 'failed',
+              completed_at = CURRENT_TIMESTAMP,
+              error = ?
+          WHERE id = ?
+        `).bind(String(error?.message || error), runId).run();
+      }
+    } catch (error) {
+      // A schema/bootstrap failure occurs before a run record can be created.
+      // Cloudflare still receives a contained scheduled-handler failure.
+      console.error("Aren scheduled cycle could not start:", String(error?.message || error));
     }
   }
 };
