@@ -261,6 +261,20 @@ async function ensureTables(db) {
     )
   `).run();
 
+  // Keep a durable link between AI-generated research suggestions and the
+  // research queue. Suggestions remain questions, never accepted findings.
+  await db.prepare(`
+    CREATE TABLE IF NOT EXISTS ai_development_review_questions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      review_id INTEGER NOT NULL,
+      question TEXT NOT NULL,
+      research_id INTEGER,
+      status TEXT DEFAULT 'queued',
+      created DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(review_id, question)
+    )
+  `).run();
+
   await db.prepare(`
     CREATE TABLE IF NOT EXISTS research (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2042,27 +2056,71 @@ async function handleSelfDirectedResearch(db) {
 
   for (const lesson of lessons) {
     const existing = await db.prepare(`
-      SELECT id, status
+      SELECT id, status, created
       FROM research
       WHERE target_memory_id = ?
+        AND research_kind = 'self_directed'
       ORDER BY id DESC
       LIMIT 1
     `).bind(lesson.id).first();
 
     if (existing) {
-      skipped.push({
-        lesson_id: lesson.id,
-        research_id: existing.id,
-        reason: "A research question is already recorded for this lesson."
-      });
-      continue;
+      const [sourceRow, attemptRow] = await Promise.all([
+        db.prepare(`
+          SELECT COUNT(*) AS count
+          FROM research_sources
+          WHERE research_id = ?
+        `).bind(existing.id).first(),
+        db.prepare(`
+          SELECT COUNT(*) AS count
+          FROM research_discovery_runs
+          WHERE research_id = ?
+        `).bind(existing.id).first()
+      ]);
+      const sourceCount = Number(sourceRow?.count || 0);
+      const attemptCount = Number(attemptRow?.count || 0);
+      const stillActive =
+        ["planned", "new", "source_collected"].includes(String(existing.status || "").toLowerCase()) &&
+        sourceCount < 6 &&
+        attemptCount < 3;
+
+      if (stillActive) {
+        skipped.push({
+          lesson_id: lesson.id,
+          research_id: existing.id,
+          reason: "A self-directed research question is still within its discovery limits."
+        });
+        continue;
+      }
+
+      // Exhausted/completed research is not repeated endlessly. A new
+      // question is allowed only after new reviewed experience changes
+      // the lesson's evidence base.
+      const newExperience = await db.prepare(`
+        SELECT COUNT(*) AS count
+        FROM memory_history
+        WHERE memory_id = ?
+          AND event IN ('evidence', 'challenge', 'development_test')
+          AND created > COALESCE(?, '1970-01-01')
+      `).bind(lesson.id, existing.created).first();
+
+      if (Number(newExperience?.count || 0) === 0) {
+        skipped.push({
+          lesson_id: lesson.id,
+          research_id: existing.id,
+          reason: "Previous research is complete or exhausted; waiting for new reviewed experience before opening a follow-up."
+        });
+        continue;
+      }
     }
 
     const evidenceCount = Number(lesson.evidence_count || 0);
     const challengedCount = Number(lesson.challenged_count || 0);
     let question;
 
-    if (evidenceCount > 0 && challengedCount > 0) {
+    if (existing && evidenceCount > 0 && challengedCount > 0) {
+      question = `After new reviewed experience, reassess the supporting and challenging outcomes for lesson ${lesson.id}: "${lesson.text}". Identify the conditions that may explain the different outcomes.`;
+    } else if (evidenceCount > 0 && challengedCount > 0) {
       question = `Compare the supporting and challenging reviewed experiences for this lesson: "${lesson.text}". Identify the conditions that may explain the different outcomes.`;
     } else if (challengedCount > 0) {
       question = `What reliable evidence supports or challenges this lesson: "${lesson.text}"? Examine the conditions and limits of the lesson.`;
@@ -2104,7 +2162,7 @@ async function handleSelfDirectedResearch(db) {
     questions_created: planned.length,
     planned,
     skipped,
-    rule: "Planning a question does not establish a fact or change a principle."
+    rule: "Planning a question does not establish a fact or change a principle. Follow-up research requires new reviewed experience."
   });
 }
 
@@ -4158,6 +4216,82 @@ async function handleResearchSources(db, url) {
   });
 }
 
+async function enqueueAIDevelopmentResearchQuestions(db, reviewId, questions) {
+  if (!reviewId || !Array.isArray(questions)) {
+    return { queued: 0, skipped: 0, items: [] };
+  }
+
+  const active = await db.prepare(`
+    SELECT question
+    FROM research
+    WHERE research_kind = 'self_directed'
+      AND status IN ('planned', 'new', 'source_collected')
+    ORDER BY id DESC
+    LIMIT 30
+  `).all();
+  const activeQuestions = (active.results || []).map(row => String(row.question || ""));
+  const activeCount = await db.prepare(`
+    SELECT COUNT(*) AS count
+    FROM research
+    WHERE research_kind = 'self_directed'
+      AND status IN ('planned', 'new', 'source_collected')
+  `).first();
+
+  let capacity = Math.max(0, 3 - Number(activeCount?.count || 0));
+  const items = [];
+  let queued = 0;
+  let skipped = 0;
+
+  for (const raw of questions.slice(0, 5)) {
+    const question = cleanText(raw).slice(0, 700);
+    if (question.length < 20 || capacity <= 0) {
+      skipped++;
+      items.push({ question, status: "skipped", reason: capacity <= 0 ? "Autonomous research queue is at its safe capacity." : "Question is too short to be actionable." });
+      continue;
+    }
+
+    const duplicate = activeQuestions.some(existing =>
+      normalize(existing) === normalize(question) ||
+      wordOverlap(existing, question) >= 0.72
+    );
+    if (duplicate) {
+      skipped++;
+      items.push({ question, status: "skipped", reason: "A substantially similar self-directed research question is already active." });
+      continue;
+    }
+
+    const researchInsert = await db.prepare(`
+      INSERT INTO research (question, status, target_memory_id, research_kind)
+      VALUES (?, 'planned', NULL, 'self_directed')
+    `).bind(question, reviewId).run();
+    const researchId = researchInsert.meta?.last_row_id || null;
+
+    const queueInsert = await db.prepare(`
+      INSERT OR IGNORE INTO ai_development_review_questions
+        (review_id, question, research_id, status)
+      VALUES (?, ?, ?, 'queued')
+    `).bind(reviewId, question, researchId).run();
+
+    if (Number(queueInsert.meta?.changes || 0) > 0) {
+      queued++;
+      capacity--;
+      activeQuestions.push(question);
+      items.push({ question, research_id: researchId, status: "queued" });
+    } else {
+      skipped++;
+      items.push({ question, status: "skipped", reason: "This review question was already recorded." });
+    }
+  }
+
+  return {
+    queued,
+    skipped,
+    active_queue_capacity: 3,
+    items,
+    rule: "AI-generated questions enter research planning only. They do not establish facts, verify sources, change lessons, or alter principles."
+  };
+}
+
 async function handleAIDevelopmentReview(db, env) {
   const model = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
 
@@ -4299,7 +4433,13 @@ async function handleAIDevelopmentReview(db, env) {
       reviewId
     ).run();
 
-    return { status: "completed", review_id: reviewId, model, ...result };
+    const researchQueue = await enqueueAIDevelopmentResearchQuestions(
+      db,
+      reviewId,
+      result.research_questions
+    );
+
+    return { status: "completed", review_id: reviewId, model, ...result, research_queue: researchQueue };
   } catch (error) {
     const message = String(error?.message || error).slice(0, 1000);
     await db.prepare(`
