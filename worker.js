@@ -4365,6 +4365,7 @@ async function handleHealth(db) {
     "development_cycles",
     "development_tasks",
     "autonomous_cycle_runs",
+    "ai_development_reviews",
     "development_test_links",
     "principle_candidates",
     "research",
@@ -4415,14 +4416,19 @@ async function handleBackup(db) {
     SELECT * FROM research_source_assessments ORDER BY id ASC
   `).all();
 
+  const aiDevelopmentReviews = await db.prepare(`
+    SELECT * FROM ai_development_reviews ORDER BY id ASC
+  `).all();
+
   return json({
-    backup_version: 1,
+    backup_version: 2,
     created_at: new Date().toISOString(),
     source: "Aren-DB",
     memories: memories.results || [],
     judgments: judgments.results || [],
     memory_history: memoryHistory.results || [],
-    research_source_assessments: researchSourceAssessments.results || []
+    research_source_assessments: researchSourceAssessments.results || [],
+    ai_development_reviews: aiDevelopmentReviews.results || []
   });
 }
 
