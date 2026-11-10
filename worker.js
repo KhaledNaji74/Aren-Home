@@ -4260,27 +4260,36 @@ async function enqueueAIDevelopmentResearchQuestions(db, reviewId, questions) {
       continue;
     }
 
+    // Record the review/question pair first. This makes retries idempotent
+    // and prevents an orphan research row if the audit insert is rejected.
+    const queueInsert = await db.prepare(`
+      INSERT OR IGNORE INTO ai_development_review_questions
+        (review_id, question, research_id, status)
+      VALUES (?, ?, NULL, 'queued')
+    `).bind(reviewId, question).run();
+
+    if (Number(queueInsert.meta?.changes || 0) === 0) {
+      skipped++;
+      items.push({ question, status: "skipped", reason: "This review question was already recorded." });
+      continue;
+    }
+
     const researchInsert = await db.prepare(`
       INSERT INTO research (question, status, target_memory_id, research_kind)
       VALUES (?, 'planned', NULL, 'self_directed')
     `).bind(question).run();
     const researchId = researchInsert.meta?.last_row_id || null;
 
-    const queueInsert = await db.prepare(`
-      INSERT OR IGNORE INTO ai_development_review_questions
-        (review_id, question, research_id, status)
-      VALUES (?, ?, ?, 'queued')
-    `).bind(reviewId, question, researchId).run();
+    await db.prepare(`
+      UPDATE ai_development_review_questions
+      SET research_id = ?
+      WHERE review_id = ? AND question = ?
+    `).bind(researchId, reviewId, question).run();
 
-    if (Number(queueInsert.meta?.changes || 0) > 0) {
-      queued++;
-      capacity--;
-      activeQuestions.push(question);
-      items.push({ question, research_id: researchId, status: "queued" });
-    } else {
-      skipped++;
-      items.push({ question, status: "skipped", reason: "This review question was already recorded." });
-    }
+    queued++;
+    capacity--;
+    activeQuestions.push(question);
+    items.push({ question, research_id: researchId, status: "queued" });
   }
 
   return {
@@ -5072,7 +5081,35 @@ export default {
         const response = await handleAutonomousCycle(db);
         const result = await response.json();
         const aiReview = await handleAIDevelopmentReview(db, env);
-        result.ai_development_review = aiReview;
+        let aiResearchQueue = aiReview.research_queue || null;
+        const sourceReviewId = aiReview.review_id || aiReview.previous_review_id || null;
+
+        // If today's AI review was already completed before this feature was
+        // deployed, enqueue its stored questions once without waiting 24 hours.
+        if (!aiResearchQueue && sourceReviewId) {
+          const storedReview = await db.prepare(`
+            SELECT questions_json
+            FROM ai_development_reviews
+            WHERE id = ? AND status = 'completed'
+          `).bind(sourceReviewId).first();
+
+          if (storedReview?.questions_json) {
+            let storedQuestions = [];
+            try {
+              storedQuestions = JSON.parse(storedReview.questions_json);
+            } catch (_) {}
+            aiResearchQueue = await enqueueAIDevelopmentResearchQuestions(
+              db,
+              sourceReviewId,
+              storedQuestions
+            );
+          }
+        }
+
+        result.ai_development_review = {
+          ...aiReview,
+          ...(aiResearchQueue ? { research_queue: aiResearchQueue } : {})
+        };
         await db.prepare(`
           UPDATE autonomous_cycle_runs
           SET status = 'completed',
