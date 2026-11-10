@@ -4222,19 +4222,23 @@ async function enqueueAIDevelopmentResearchQuestions(db, reviewId, questions) {
   }
 
   const active = await db.prepare(`
-    SELECT question
-    FROM research
-    WHERE research_kind = 'self_directed'
-      AND status IN ('planned', 'new', 'source_collected')
-    ORDER BY id DESC
+    SELECT r.question
+    FROM research r
+    WHERE r.research_kind = 'self_directed'
+      AND r.status IN ('planned', 'new', 'source_collected')
+      AND (SELECT COUNT(*) FROM research_sources s WHERE s.research_id = r.id) < 6
+      AND (SELECT COUNT(*) FROM research_discovery_runs d WHERE d.research_id = r.id) < 3
+    ORDER BY r.id DESC
     LIMIT 30
   `).all();
   const activeQuestions = (active.results || []).map(row => String(row.question || ""));
   const activeCount = await db.prepare(`
     SELECT COUNT(*) AS count
-    FROM research
-    WHERE research_kind = 'self_directed'
-      AND status IN ('planned', 'new', 'source_collected')
+    FROM research r
+    WHERE r.research_kind = 'self_directed'
+      AND r.status IN ('planned', 'new', 'source_collected')
+      AND (SELECT COUNT(*) FROM research_sources s WHERE s.research_id = r.id) < 6
+      AND (SELECT COUNT(*) FROM research_discovery_runs d WHERE d.research_id = r.id) < 3
   `).first();
 
   let capacity = Math.max(0, 3 - Number(activeCount?.count || 0));
