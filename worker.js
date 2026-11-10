@@ -4180,6 +4180,7 @@ async function handleHealth(db) {
     "memory_history",
     "development_cycles",
     "development_tasks",
+    "autonomous_cycle_runs",
     "development_test_links",
     "principle_candidates",
     "research",
