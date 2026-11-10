@@ -4263,7 +4263,7 @@ async function enqueueAIDevelopmentResearchQuestions(db, reviewId, questions) {
     const researchInsert = await db.prepare(`
       INSERT INTO research (question, status, target_memory_id, research_kind)
       VALUES (?, 'planned', NULL, 'self_directed')
-    `).bind(question, reviewId).run();
+    `).bind(question, null).run();
     const researchId = researchInsert.meta?.last_row_id || null;
 
     const queueInsert = await db.prepare(`
