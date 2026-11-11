@@ -2108,11 +2108,20 @@ async function handleSelfDirectedResearch(db) {
       // actually been screened. It changes the research angle instead of
       // endlessly repeating the same query. It does not accept sources
       // as facts or change lesson counts/principles.
-      if (reviewCount === 0) {
+      // Continue only after every collected source has been screened.
+      // If discovery exhausted all attempts without finding a source, allow
+      // a new bounded research angle rather than leaving the lesson stuck.
+      const allSourcesScreened = sourceCount === 0
+        ? attemptCount >= 3
+        : reviewCount >= sourceCount;
+
+      if (!allSourcesScreened) {
         skipped.push({
           lesson_id: lesson.id,
           research_id: existing.id,
-          reason: "The previous question has no completed source screening yet."
+          reason: sourceCount === 0
+            ? "Discovery has not exhausted its attempts yet."
+            : "Some collected sources still need screening."
         });
         continue;
       }
