@@ -3052,23 +3052,55 @@ async function handleResearchDiscover(db, url) {
     .trim();
 
   const normalizedQuestion = normalize(searchTerm);
+  const isConfidenceTopic = /\b(confidence|overconfidence|calibration|certainty|confidence level|confidence rating)\b/.test(normalizedQuestion);
+  const isBiasTopic = /\b(bias|alternative viewpoint|alternative perspective|confirmation|blind spot|counterargument)\b/.test(normalizedQuestion);
+  const isPrincipleTopic = /\b(principle|principles|values|ethical|ethics|interact|influence each other)\b/.test(normalizedQuestion);
+  const isApplicationTopic = /\b(apply|applied|application|situations|contexts|transfer|generaliz|different circumstances)\b/.test(normalizedQuestion);
   const isDecisionTopic = /\b(decision|decisions|judgment|judgement|consequence|consequences|outcome|outcomes)\b/.test(normalizedQuestion);
+  const researchTopic = isConfidenceTopic ? "judgment-confidence"
+    : isBiasTopic ? "bias-and-alternative-viewpoints"
+    : isPrincipleTopic ? "principles-and-ethical-reasoning"
+    : isApplicationTopic ? "application-and-context-transfer"
+    : isDecisionTopic ? "decision-making-and-outcomes"
+    : "learning-from-experience";
 
-  // Relevance is evaluated by independent meaning groups, not raw keyword counts.
-  // This prevents long, unrelated articles from passing through incidental word overlap.
-  const profiles = isDecisionTopic
-    ? [
-        { name: "decision-making", patterns: [/\bdecision making\b/, /\bdecision-making\b/, /\bdecision theory\b/, /\bjudgment\b/, /\bjudgement\b/] },
-        { name: "outcomes-and-consequences", patterns: [/\bdecision outcomes?\b/, /\boutcome evaluation\b/, /\bconsequences? of decisions?\b/, /\bdecision consequences?\b/, /\boutcome bias\b/, /\bfeedback on decisions?\b/] },
-        { name: "learning-and-review", patterns: [/\blearning from (experience|outcomes|mistakes)\b/, /\bexperiential learning\b/, /\breflective practice\b/, /\bafter action review\b/] }
-      ]
-    : [
-        { name: "learning-from-experience", patterns: [/\blearning from experience\b/, /\blearning through experience\b/, /\bexperiential learning\b/, /\bexperience-based learning\b/, /\blessons learned\b/, /\breflective practice\b/, /\breflection on experience\b/] },
-        { name: "preservation-and-retention", patterns: [/\bknowledge retention\b/, /\bmemory retention\b/, /\bmemory consolidation\b/, /\blong-term memory\b/, /\borganizational memory\b/, /\binstitutional memory\b/, /\bknowledge management\b/, /\bknowledge preservation\b/, /\bpreserving knowledge\b/, /\bretention of knowledge\b/] },
-        { name: "review-and-improvement", patterns: [/\bafter action review\b/, /\bpostmortem analysis\b/, /\bcontinuous improvement\b/, /\breflective learning\b/, /\bexperience review\b/, /\blessons learned process\b/] },
-        { name: "memory-and-retrieval", patterns: [/\bepisodic memory\b/, /\bautobiographical memory\b/, /\bmemory retrieval\b/, /\bretrieval practice\b/, /\bmemory recall\b/, /\brecall of past experience\b/] },
-        { name: "knowledge-capture-and-transfer", patterns: [/\bknowledge capture\b/, /\bknowledge transfer\b/, /\bknowledge sharing\b/, /\borganizational learning\b/, /\bexperience sharing\b/] }
-      ];
+  // Match sources to the actual question's subject, not a fixed generic theme.
+  // Each profile represents a distinct concept that must appear in the title or abstract.
+  const profilesByTopic = {
+    "judgment-confidence": [
+      { name: "decision-making", patterns: [/\bdecision making\b/, /\bdecision-making\b/, /\bjudgment\b/, /\bjudgement\b/] },
+      { name: "confidence-calibration", patterns: [/\bconfidence calibration\b/, /\bcalibration of confidence\b/, /\bconfidence accuracy\b/, /\bdecision confidence\b/, /\bconfidence judgments?\b/] },
+      { name: "overconfidence-and-bias", patterns: [/\boverconfidence\b/, /\bmiscalibration\b/, /\bconfidence bias\b/, /\bmetacognitive accuracy\b/, /\bconfidence and accuracy\b/] }
+    ],
+    "bias-and-alternative-viewpoints": [
+      { name: "decision-making", patterns: [/\bdecision making\b/, /\bdecision-making\b/, /\bjudgment\b/, /\bjudgement\b/] },
+      { name: "cognitive-bias", patterns: [/\bcognitive bias\b/, /\bconfirmation bias\b/, /\bmotivated reasoning\b/, /\bdecision bias\b/, /\boverconfidence\b/] },
+      { name: "alternative-viewpoints", patterns: [/\bdissent\b/, /\bdissenting views?\b/, /\bminority opinion\b/, /\bconsidering alternatives\b/, /\bmultiple perspectives\b/, /\bperspective taking\b/] }
+    ],
+    "principles-and-ethical-reasoning": [
+      { name: "principles-and-values", patterns: [/\bmoral principles?\b/, /\bethical principles?\b/, /\bvalues-based decision\b/, /\bvalue conflict\b/, /\bprinciple-based reasoning\b/] },
+      { name: "decision-making", patterns: [/\bdecision making\b/, /\bdecision-making\b/, /\bjudgment\b/, /\bjudgement\b/] },
+      { name: "ethical-reasoning", patterns: [/\bethical reasoning\b/, /\bmoral reasoning\b/, /\bpractical ethics\b/, /\bethical decision\b/] }
+    ],
+    "application-and-context-transfer": [
+      { name: "application-and-transfer", patterns: [/\btransfer of learning\b/, /\bknowledge transfer\b/, /\btransfer across contexts\b/, /\bapplication of learning\b/, /\bgeneralization\b/, /\bgeneralisation\b/] },
+      { name: "context-and-situation", patterns: [/\bcontextual factors?\b/, /\bsituational factors?\b/, /\bcontext-dependent\b/, /\bdifferent contexts\b/, /\bcontext of decision making\b/] },
+      { name: "learning-from-experience", patterns: [/\blearning from experience\b/, /\bexperiential learning\b/, /\breflective practice\b/, /\blessons learned\b/] }
+    ],
+    "decision-making-and-outcomes": [
+      { name: "decision-making", patterns: [/\bdecision making\b/, /\bdecision-making\b/, /\bdecision theory\b/, /\bjudgment\b/, /\bjudgement\b/] },
+      { name: "outcomes-and-consequences", patterns: [/\bdecision outcomes?\b/, /\boutcome evaluation\b/, /\bconsequences? of decisions?\b/, /\bdecision consequences?\b/, /\boutcome bias\b/, /\bfeedback on decisions?\b/] },
+      { name: "learning-and-review", patterns: [/\blearning from (experience|outcomes|mistakes)\b/, /\bexperiential learning\b/, /\breflective practice\b/, /\bafter action review\b/] }
+    ],
+    "learning-from-experience": [
+      { name: "learning-from-experience", patterns: [/\blearning from experience\b/, /\blearning through experience\b/, /\bexperiential learning\b/, /\bexperience-based learning\b/, /\blessons learned\b/, /\breflective practice\b/, /\breflection on experience\b/] },
+      { name: "preservation-and-retention", patterns: [/\bknowledge retention\b/, /\bmemory retention\b/, /\bmemory consolidation\b/, /\blong-term memory\b/, /\borganizational memory\b/, /\binstitutional memory\b/, /\bknowledge management\b/, /\bknowledge preservation\b/, /\bpreserving knowledge\b/, /\bretention of knowledge\b/] },
+      { name: "review-and-improvement", patterns: [/\bafter action review\b/, /\bpostmortem analysis\b/, /\bcontinuous improvement\b/, /\breflective learning\b/, /\bexperience review\b/, /\blessons learned process\b/] },
+      { name: "memory-and-retrieval", patterns: [/\bepisodic memory\b/, /\bautobiographical memory\b/, /\bmemory retrieval\b/, /\bretrieval practice\b/, /\bmemory recall\b/, /\brecall of past experience\b/] },
+      { name: "knowledge-capture-and-transfer", patterns: [/\bknowledge capture\b/, /\bknowledge transfer\b/, /\bknowledge sharing\b/, /\borganizational learning\b/, /\bexperience sharing\b/] }
+    ]
+  };
+  const profiles = profilesByTopic[researchTopic];
 
   const matchedProfiles = content => {
     const text = normalize(content);
@@ -3092,68 +3124,88 @@ async function handleResearchDiscover(db, url) {
   const academicRelevanceGate = score => {
     const titleGroups = score.title_matches || [];
     const bodyGroups = score.body_matches || [];
-    if (isDecisionTopic) {
-      const titleTopicAnchor =
-        titleGroups.includes("decision-making") ||
-        titleGroups.includes("outcomes-and-consequences");
-      const abstractDecisionAnchor = bodyGroups.includes("decision-making");
-      const abstractOutcomeOrLearningAnchor =
-        bodyGroups.includes("outcomes-and-consequences") ||
-        bodyGroups.includes("learning-and-review");
-      return {
-        title_topic_anchor: titleTopicAnchor,
-        abstract_decision_anchor: abstractDecisionAnchor,
-        abstract_outcome_or_learning_anchor: abstractOutcomeOrLearningAnchor,
-        passed: titleTopicAnchor && abstractDecisionAnchor && abstractOutcomeOrLearningAnchor
-      };
-    }
-    const titleTopicAnchor = [
-      "learning-from-experience",
-      "preservation-and-retention",
-      "memory-and-retrieval",
-      "review-and-improvement"
-    ].some(group => titleGroups.includes(group));
-    const abstractLearningAnchor = [
-      "learning-from-experience",
-      "memory-and-retrieval",
-      "review-and-improvement"
-    ].some(group => bodyGroups.includes(group));
-    const abstractRetentionAnchor = [
-      "preservation-and-retention",
-      "memory-and-retrieval",
-      "knowledge-capture-and-transfer"
-    ].some(group => bodyGroups.includes(group));
+    const requirements = {
+      "judgment-confidence": {
+        title: ["decision-making", "confidence-calibration", "overconfidence-and-bias"],
+        body: ["decision-making", "confidence-calibration", "overconfidence-and-bias"]
+      },
+      "bias-and-alternative-viewpoints": {
+        title: ["decision-making", "cognitive-bias", "alternative-viewpoints"],
+        body: ["decision-making", "cognitive-bias", "alternative-viewpoints"]
+      },
+      "principles-and-ethical-reasoning": {
+        title: ["principles-and-values", "ethical-reasoning", "decision-making"],
+        body: ["principles-and-values", "ethical-reasoning", "decision-making"]
+      },
+      "application-and-context-transfer": {
+        title: ["application-and-transfer", "context-and-situation", "learning-from-experience"],
+        body: ["application-and-transfer", "context-and-situation", "learning-from-experience"]
+      },
+      "decision-making-and-outcomes": {
+        title: ["decision-making", "outcomes-and-consequences"],
+        body: ["decision-making", "outcomes-and-consequences", "learning-and-review"]
+      },
+      "learning-from-experience": {
+        title: ["learning-from-experience", "preservation-and-retention", "memory-and-retrieval", "review-and-improvement"],
+        body: ["learning-from-experience", "memory-and-retrieval", "review-and-improvement", "preservation-and-retention", "knowledge-capture-and-transfer"]
+      }
+    };
+    const rule = requirements[researchTopic];
+    const titleTopicAnchor = rule.title.some(group => titleGroups.includes(group));
+    const abstractConceptGroups = rule.body.filter(group => bodyGroups.includes(group));
+    const requiredAbstractGroups = 2;
     return {
       title_topic_anchor: titleTopicAnchor,
-      abstract_learning_anchor: abstractLearningAnchor,
-      abstract_retention_anchor: abstractRetentionAnchor,
-      passed: titleTopicAnchor && abstractLearningAnchor && abstractRetentionAnchor
+      abstract_concept_groups: abstractConceptGroups,
+      required_abstract_groups: requiredAbstractGroups,
+      passed: titleTopicAnchor && abstractConceptGroups.length >= requiredAbstractGroups
     };
   };
 
-  // Use cross-disciplinary vocabulary for experience-to-learning research.
-  // Targeted terms come first; the original lesson wording remains as a final query.
-  const searchTerms = [];
-  if (isDecisionTopic) {
-    searchTerms.push(
+  // Use vocabulary targeted to the detected research topic. The original
+  // question remains as a final query so discovery can still follow its wording.
+  const topicSearchTerms = {
+    "judgment-confidence": [
+      "decision confidence calibration accuracy",
+      "overconfidence judgment decision making",
+      "confidence judgments metacognitive accuracy",
+      "confidence bias decision outcomes"
+    ],
+    "bias-and-alternative-viewpoints": [
+      "confirmation bias decision making alternative perspectives",
+      "cognitive bias considering alternative viewpoints",
+      "dissenting opinions group decision quality",
+      "motivated reasoning judgment decision making"
+    ],
+    "principles-and-ethical-reasoning": [
+      "ethical principles moral reasoning decision making",
+      "values conflicts ethical decision making",
+      "principle based reasoning practical ethics",
+      "moral judgment principles consequences"
+    ],
+    "application-and-context-transfer": [
+      "transfer of learning across contexts",
+      "context dependent decision making experience",
+      "application of lessons learned different situations",
+      "knowledge transfer contextual factors"
+    ],
+    "decision-making-and-outcomes": [
       "decision making learning from outcomes",
       "decision feedback learning from outcomes",
       "after action review decision outcomes",
       "decision making learning from mistakes",
       "decision analysis outcome evaluation"
-    );
-  } else {
-    searchTerms.push(
+    ],
+    "learning-from-experience": [
       "experiential learning knowledge retention",
       "lessons learned organizational learning",
       "after action review lessons learned",
       "reflective practice experience retention",
       "debriefing knowledge capture",
-      "post incident review organizational learning",
       "experience based learning knowledge transfer"
-    );
-  }
-  searchTerms.push(searchTerm);
+    ]
+  };
+  const searchTerms = [...topicSearchTerms[researchTopic], searchTerm];
   const uniqueSearchTerms = [...new Set(searchTerms)].slice(0, 7);
 
   try {
@@ -3349,17 +3401,35 @@ async function handleResearchDiscover(db, url) {
     };
     if (saved.length < 3) {
       europePmcProvider.attempted = true;
-      const europePmcQueries = isDecisionTopic
-        ? [
-            'TITLE_ABS:("decision making" OR "decision-making") AND TITLE_ABS:(outcome OR consequence OR feedback)',
-            'TITLE_ABS:("learning from mistakes" OR "decision feedback" OR "reflective practice") AND TITLE_ABS:(decision OR outcome)'
-          ]
-        : [
-            'TITLE_ABS:("experiential learning" OR "learning from experience") AND TITLE_ABS:("memory retention" OR "memory consolidation" OR "knowledge retention")',
-            'TITLE_ABS:("lessons learned" OR "reflective practice" OR "after action review") AND TITLE_ABS:("knowledge retention" OR "organizational memory" OR "knowledge management")',
-            'TITLE_ABS:("episodic memory" OR "autobiographical memory") AND TITLE_ABS:(learning OR experience OR "memory consolidation")',
-            'TITLE_ABS:("memory consolidation" OR "long-term memory") AND TITLE_ABS:(experience OR learning OR retrieval)'
-          ];
+      const europePmcQueriesByTopic = {
+        "judgment-confidence": [
+          'TITLE_ABS:("decision confidence" OR "confidence calibration" OR "confidence judgment") AND TITLE_ABS:(decision OR judgment OR accuracy)',
+          'TITLE_ABS:(overconfidence OR "metacognitive accuracy" OR "confidence bias") AND TITLE_ABS:("decision making" OR judgment)'
+        ],
+        "bias-and-alternative-viewpoints": [
+          'TITLE_ABS:("confirmation bias" OR "cognitive bias" OR "motivated reasoning") AND TITLE_ABS:("decision making" OR judgment)',
+          'TITLE_ABS:(dissent OR "alternative perspectives" OR "multiple perspectives") AND TITLE_ABS:(decision OR judgment OR reasoning)'
+        ],
+        "principles-and-ethical-reasoning": [
+          'TITLE_ABS:("ethical reasoning" OR "moral reasoning" OR "ethical decision") AND TITLE_ABS:(principle OR values OR judgment)',
+          'TITLE_ABS:("value conflict" OR "principle-based reasoning") AND TITLE_ABS:(ethics OR decision OR moral)'
+        ],
+        "application-and-context-transfer": [
+          'TITLE_ABS:("transfer of learning" OR "knowledge transfer") AND TITLE_ABS:(context OR situation OR application)',
+          'TITLE_ABS:("context-dependent" OR "contextual factors") AND TITLE_ABS:("decision making" OR learning OR experience)'
+        ],
+        "decision-making-and-outcomes": [
+          'TITLE_ABS:("decision making" OR "decision-making") AND TITLE_ABS:(outcome OR consequence OR feedback)',
+          'TITLE_ABS:("learning from mistakes" OR "decision feedback" OR "reflective practice") AND TITLE_ABS:(decision OR outcome)'
+        ],
+        "learning-from-experience": [
+          'TITLE_ABS:("experiential learning" OR "learning from experience") AND TITLE_ABS:("memory retention" OR "memory consolidation" OR "knowledge retention")',
+          'TITLE_ABS:("lessons learned" OR "reflective practice" OR "after action review") AND TITLE_ABS:("knowledge retention" OR "organizational memory" OR "knowledge management")',
+          'TITLE_ABS:("episodic memory" OR "autobiographical memory") AND TITLE_ABS:(learning OR experience OR "memory consolidation")',
+          'TITLE_ABS:("memory consolidation" OR "long-term memory") AND TITLE_ABS:(experience OR learning OR retrieval)'
+        ]
+      };
+      const europePmcQueries = europePmcQueriesByTopic[researchTopic];
       const europePmcWorks = new Map();
       try {
         for (const query of europePmcQueries) {
@@ -3488,6 +3558,7 @@ async function handleResearchDiscover(db, url) {
       status: "Research source discovery completed.",
       research_id: researchId,
       search_term: searchTerm,
+      search_topic: researchTopic,
       search_variants: uniqueSearchTerms,
       provider: "OpenAlex and Europe PMC academic indexes; Wikipedia search used only for discovery leads",
       candidates_found: candidates.length,
