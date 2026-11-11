@@ -2055,17 +2055,20 @@ async function handleSelfDirectedResearch(db) {
   const skipped = [];
 
   for (const lesson of lessons) {
-    const existing = await db.prepare(`
-      SELECT id, status, created
+    const history = await db.prepare(`
+      SELECT id, question, status, created
       FROM research
       WHERE target_memory_id = ?
         AND research_kind = 'self_directed'
-      ORDER BY id DESC
-      LIMIT 1
-    `).bind(lesson.id).first();
+      ORDER BY id ASC
+    `).bind(lesson.id).all();
+    const priorQuestions = history.results || [];
+    const existing = priorQuestions.length
+      ? priorQuestions[priorQuestions.length - 1]
+      : null;
 
     if (existing) {
-      const [sourceRow, attemptRow] = await Promise.all([
+      const [sourceRow, attemptRow, reviewRow] = await Promise.all([
         db.prepare(`
           SELECT COUNT(*) AS count
           FROM research_sources
@@ -2075,10 +2078,18 @@ async function handleSelfDirectedResearch(db) {
           SELECT COUNT(*) AS count
           FROM research_discovery_runs
           WHERE research_id = ?
+        `).bind(existing.id).first(),
+        db.prepare(`
+          SELECT COUNT(*) AS count,
+                 SUM(CASE WHEN relevance_band IN ('weak_topic_overlap', 'indirect_topic_overlap', 'partial_topic_overlap') THEN 1 ELSE 0 END) AS weak_count
+          FROM research_source_reviews
+          WHERE research_id = ?
         `).bind(existing.id).first()
       ]);
+
       const sourceCount = Number(sourceRow?.count || 0);
       const attemptCount = Number(attemptRow?.count || 0);
+      const reviewCount = Number(reviewRow?.count || 0);
       const stillActive =
         ["planned", "new", "source_collected"].includes(String(existing.status || "").toLowerCase()) &&
         sourceCount < 6 &&
@@ -2088,27 +2099,29 @@ async function handleSelfDirectedResearch(db) {
         skipped.push({
           lesson_id: lesson.id,
           research_id: existing.id,
-          reason: "A self-directed research question is still within its discovery limits."
+          reason: "The current research question still has discovery capacity."
         });
         continue;
       }
 
-      // Exhausted/completed research is not repeated endlessly. A new
-      // question is allowed only after new reviewed experience changes
-      // the lesson's evidence base.
-      const newExperience = await db.prepare(`
-        SELECT COUNT(*) AS count
-        FROM memory_history
-        WHERE memory_id = ?
-          AND event IN ('evidence', 'challenge', 'development_test')
-          AND created > COALESCE(?, '1970-01-01')
-      `).bind(lesson.id, existing.created).first();
-
-      if (Number(newExperience?.count || 0) === 0) {
+      // A bounded follow-up is allowed after the previous question has
+      // actually been screened. It changes the research angle instead of
+      // endlessly repeating the same query. It does not accept sources
+      // as facts or change lesson counts/principles.
+      if (reviewCount === 0) {
         skipped.push({
           lesson_id: lesson.id,
           research_id: existing.id,
-          reason: "Previous research is complete or exhausted; waiting for new reviewed experience before opening a follow-up."
+          reason: "The previous question has no completed source screening yet."
+        });
+        continue;
+      }
+
+      if (priorQuestions.length >= 3) {
+        skipped.push({
+          lesson_id: lesson.id,
+          research_id: existing.id,
+          reason: "The bounded limit of three research questions for this lesson has been reached."
         });
         continue;
       }
@@ -2116,16 +2129,26 @@ async function handleSelfDirectedResearch(db) {
 
     const evidenceCount = Number(lesson.evidence_count || 0);
     const challengedCount = Number(lesson.challenged_count || 0);
-    let question;
+    const weakReviews = existing
+      ? Number((await db.prepare(`
+          SELECT COUNT(*) AS count
+          FROM research_source_reviews
+          WHERE research_id = ?
+            AND relevance_band IN ('weak_topic_overlap', 'indirect_topic_overlap', 'partial_topic_overlap')
+        `).bind(existing.id).first())?.count || 0)
+      : 0;
 
+    let question;
     if (existing && evidenceCount > 0 && challengedCount > 0) {
-      question = `After new reviewed experience, reassess the supporting and challenging outcomes for lesson ${lesson.id}: "${lesson.text}". Identify the conditions that may explain the different outcomes.`;
-    } else if (evidenceCount > 0 && challengedCount > 0) {
-      question = `Compare the supporting and challenging reviewed experiences for this lesson: "${lesson.text}". Identify the conditions that may explain the different outcomes.`;
+      question = `Independent follow-up: identify boundary conditions, counterexamples, and situations where this lesson may fail: "${lesson.text}". Compare distinct findings rather than relying on source counts.`;
+    } else if (existing && weakReviews > 0) {
+      question = `Find direct, topic-specific research on the practical application and limitations of this lesson: "${lesson.text}". Exclude adjacent memory or learning topics unless they directly test the lesson.`;
+    } else if (existing) {
+      question = `Seek independent replication and credible counterarguments concerning this lesson: "${lesson.text}". Distinguish direct evidence from background context.`;
     } else if (challengedCount > 0) {
-      question = `What reliable evidence supports or challenges this lesson: "${lesson.text}"? Examine the conditions and limits of the lesson.`;
+      question = `What reliable evidence supports or challenges this lesson: "${lesson.text}"? Examine conditions, counterexamples, and limits.`;
     } else {
-      question = `What reliable evidence supports or challenges this untested lesson: "${lesson.text}"?`;
+      question = `What reliable evidence directly tests this untested lesson: "${lesson.text}"? Distinguish direct evidence from adjacent topics.`;
     }
 
     const inserted = await db.prepare(`
@@ -2139,7 +2162,8 @@ async function handleSelfDirectedResearch(db) {
       lesson_id: lesson.id,
       question,
       status: "planned",
-      note: "Question generated from stored knowledge. Sources and findings still require evaluation."
+      sequence: priorQuestions.length + 1,
+      note: "A bounded new research angle was generated. Sources remain unverified and cannot automatically become evidence."
     });
   }
 
@@ -2150,8 +2174,8 @@ async function handleSelfDirectedResearch(db) {
   `).bind(
     "self_evaluation",
     "plan_self_directed_research",
-    "Aren identified untested or challenged lessons that need more evidence.",
-    JSON.stringify({ planned, skipped }),
+    "Aren identified untested or challenged lessons and checked whether a screened, bounded follow-up research angle is justified.",
+    JSON.stringify({ planned, skipped, max_questions_per_lesson: 3 }),
     "completed"
   ).run();
 
@@ -2162,7 +2186,8 @@ async function handleSelfDirectedResearch(db) {
     questions_created: planned.length,
     planned,
     skipped,
-    rule: "Planning a question does not establish a fact or change a principle. Follow-up research requires new reviewed experience."
+    max_questions_per_lesson: 3,
+    rule: "New research angles are bounded and require prior source screening. Discovery never verifies a source, creates a fact, changes lesson evidence counts, or changes a principle."
   });
 }
 
