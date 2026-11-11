@@ -3153,7 +3153,7 @@ async function handleResearchDiscover(db, url) {
     const rule = requirements[researchTopic];
     const titleTopicAnchor = rule.title.some(group => titleGroups.includes(group));
     const abstractConceptGroups = rule.body.filter(group => bodyGroups.includes(group));
-    const requiredAbstractGroups = researchTopic === "learning-from-experience" ? 2 : 2;
+    const requiredAbstractGroups = 2;
     return {
       title_topic_anchor: titleTopicAnchor,
       abstract_concept_groups: abstractConceptGroups,
@@ -3162,8 +3162,8 @@ async function handleResearchDiscover(db, url) {
     };
   };
 
-  // Use cross-disciplinary vocabulary for experience-to-learning research.
-  // Targeted terms come first; the original lesson wording remains as a final query.
+  // Use vocabulary targeted to the detected research topic. The original
+  // question remains as a final query so discovery can still follow its wording.
   const topicSearchTerms = {
     "judgment-confidence": [
       "decision confidence calibration accuracy",
@@ -3558,6 +3558,7 @@ async function handleResearchDiscover(db, url) {
       status: "Research source discovery completed.",
       research_id: researchId,
       search_term: searchTerm,
+      search_topic: researchTopic,
       search_variants: uniqueSearchTerms,
       provider: "OpenAlex and Europe PMC academic indexes; Wikipedia search used only for discovery leads",
       candidates_found: candidates.length,
