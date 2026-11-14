@@ -2067,6 +2067,7 @@ async function handleSelfDirectedResearch(db) {
       ? priorQuestions[priorQuestions.length - 1]
       : null;
 
+    let weakReviews = 0;
     if (existing) {
       const [sourceRow, attemptRow, reviewRow] = await Promise.all([
         db.prepare(`
@@ -2090,6 +2091,7 @@ async function handleSelfDirectedResearch(db) {
       const sourceCount = Number(sourceRow?.count || 0);
       const attemptCount = Number(attemptRow?.count || 0);
       const reviewCount = Number(reviewRow?.count || 0);
+      weakReviews = Number(reviewRow?.weak_count || 0);
       const stillActive =
         ["planned", "new", "source_collected"].includes(String(existing.status || "").toLowerCase()) &&
         sourceCount < 6 &&
@@ -2104,13 +2106,9 @@ async function handleSelfDirectedResearch(db) {
         continue;
       }
 
-      // A bounded follow-up is allowed after the previous question has
-      // actually been screened. It changes the research angle instead of
-      // endlessly repeating the same query. It does not accept sources
-      // as facts or change lesson counts/principles.
-      // Continue only after every collected source has been screened.
-      // If discovery exhausted all attempts without finding a source, allow
-      // a new bounded research angle rather than leaving the lesson stuck.
+      // A new angle is allowed only after the previous question has exhausted
+      // discovery or every collected source has been screened. Screening is
+      // not verification and never changes evidence counts or principles.
       const allSourcesScreened = sourceCount === 0
         ? attemptCount >= 3
         : reviewCount >= sourceCount;
@@ -2125,39 +2123,62 @@ async function handleSelfDirectedResearch(db) {
         });
         continue;
       }
-
-      if (priorQuestions.length >= 3) {
-        skipped.push({
-          lesson_id: lesson.id,
-          research_id: existing.id,
-          reason: "The bounded limit of three research questions for this lesson has been reached."
-        });
-        continue;
-      }
     }
 
     const evidenceCount = Number(lesson.evidence_count || 0);
     const challengedCount = Number(lesson.challenged_count || 0);
-    const weakReviews = existing
-      ? Number((await db.prepare(`
-          SELECT COUNT(*) AS count
-          FROM research_source_reviews
-          WHERE research_id = ?
-            AND relevance_band IN ('weak_topic_overlap', 'indirect_topic_overlap', 'partial_topic_overlap')
-        `).bind(existing.id).first())?.count || 0)
-      : 0;
+    const sequence = priorQuestions.length + 1;
+    const previousAngles = priorQuestions
+      .slice(-6)
+      .map(row => cleanText(row.question).slice(0, 260))
+      .filter(Boolean);
 
-    let question;
-    if (existing && evidenceCount > 0 && challengedCount > 0) {
-      question = `Independent follow-up: identify boundary conditions, counterexamples, and situations where this lesson may fail: "${lesson.text}". Compare distinct findings rather than relying on source counts.`;
-    } else if (existing && weakReviews > 0) {
-      question = `Find direct, topic-specific research on the practical application and limitations of this lesson: "${lesson.text}". Exclude adjacent memory or learning topics unless they directly test the lesson.`;
-    } else if (existing) {
-      question = `Seek independent replication and credible counterarguments concerning this lesson: "${lesson.text}". Distinguish direct evidence from background context.`;
+    // Rotate across materially different research methods. There is no
+    // lifetime question ceiling: each next angle waits for the prior question
+    // to finish discovery and screening, then explicitly excludes prior angles.
+    const angles = evidenceCount > 0 && challengedCount > 0
+      ? [
+          "Find well-documented counterexamples and identify the conditions under which the lesson fails.",
+          "Compare how the lesson performs across materially different contexts, settings, and decision types.",
+          "Examine plausible causal mechanisms and whether evidence supports those mechanisms rather than mere correlation.",
+          "Compare competing explanations and frameworks that could account for the same outcomes.",
+          "Find independent replication, systematic reviews, and high-quality studies that disagree with one another.",
+          "Identify boundary conditions, measurement problems, and limitations that could explain the mixed findings."
+        ]
+      : [
+          "Identify direct empirical studies that test the lesson and define the outcomes they measured.",
+          "Find credible counterexamples and evidence that could falsify the lesson.",
+          "Compare the lesson across different contexts and identify where it does or does not apply.",
+          "Examine the mechanisms and causal pathways that would make the lesson true or false.",
+          "Compare competing explanations and identify what evidence distinguishes them.",
+          "Find independent replication and high-quality reviews, noting gaps and limitations."
+        ];
+    const angle = angles[(sequence - 1) % angles.length];
+    const historyConstraint = previousAngles.length
+      ? ` Do not repeat or repackage these earlier research angles: ${previousAngles.join(" | ")}. Choose a genuinely different question, context, method, or test.`
+      : "";
+
+    let focus;
+    if (evidenceCount > 0 && challengedCount > 0) {
+      focus = "The lesson has mixed supporting and challenging experience. Seek evidence that can discriminate between the competing interpretations.";
     } else if (challengedCount > 0) {
-      question = `What reliable evidence supports or challenges this lesson: "${lesson.text}"? Examine conditions, counterexamples, and limits.`;
+      focus = "The lesson has recorded challenges. Give serious attention to disconfirming evidence and the conditions behind those challenges.";
     } else {
-      question = `What reliable evidence directly tests this untested lesson: "${lesson.text}"? Distinguish direct evidence from adjacent topics.`;
+      focus = "The lesson is untested by reviewed experience. Seek direct evidence rather than adjacent background material.";
+    }
+
+    const question = `Research angle ${sequence}: ${angle} Lesson: "${lesson.text}". ${focus} Distinguish direct evidence from background context, report source limitations, and do not treat discovery or topic relevance as verification.${historyConstraint}`;
+
+    const duplicate = priorQuestions.some(row =>
+      normalize(row.question) === normalize(question)
+    );
+    if (duplicate) {
+      skipped.push({
+        lesson_id: lesson.id,
+        research_id: existing?.id || null,
+        reason: "The proposed research angle duplicates an earlier question; no duplicate was queued."
+      });
+      continue;
     }
 
     const inserted = await db.prepare(`
@@ -2171,8 +2192,9 @@ async function handleSelfDirectedResearch(db) {
       lesson_id: lesson.id,
       question,
       status: "planned",
-      sequence: priorQuestions.length + 1,
-      note: "A bounded new research angle was generated. Sources remain unverified and cannot automatically become evidence."
+      sequence,
+      previous_questions_considered: previousAngles.length,
+      note: "A distinct follow-up angle was generated after prior discovery and screening capacity was exhausted. Sources remain unverified and cannot automatically become evidence."
     });
   }
 
@@ -2183,8 +2205,8 @@ async function handleSelfDirectedResearch(db) {
   `).bind(
     "self_evaluation",
     "plan_self_directed_research",
-    "Aren identified untested or challenged lessons and checked whether a screened, bounded follow-up research angle is justified.",
-    JSON.stringify({ planned, skipped, max_questions_per_lesson: 3 }),
+    "Aren identified untested or challenged lessons and planned distinct follow-up angles only after prior discovery and source screening capacity was exhausted.",
+    JSON.stringify({ planned, skipped, question_limit: "no lifetime cap; one new question per eligible lesson per cycle" }),
     "completed"
   ).run();
 
@@ -2195,8 +2217,8 @@ async function handleSelfDirectedResearch(db) {
     questions_created: planned.length,
     planned,
     skipped,
-    max_questions_per_lesson: 3,
-    rule: "New research angles are bounded and require prior source screening. Discovery never verifies a source, creates a fact, changes lesson evidence counts, or changes a principle."
+    question_limit: "No lifetime cap. One distinct follow-up question per eligible lesson per cycle, after prior discovery and screening are complete.",
+    rule: "Research angles rotate across empirical testing, counterexamples, context comparison, causal mechanisms, competing explanations, and replication. Prior questions are considered to reduce repetition. Discovery never verifies a source, creates a fact, changes lesson evidence counts, or changes a principle."
   });
 }
 
