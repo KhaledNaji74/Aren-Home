@@ -5211,7 +5211,8 @@ export default {
 
       if (path === "/autonomous-cycle") {
         return await handleAutonomousCycle(
-          db
+          db,
+          env
         );
       }
 
