@@ -2133,7 +2133,7 @@ async function handleSelfDirectedResearch(db) {
     const previousAngles = priorQuestions
       .slice(-6)
       .map(row => {
-        const match = String(row.question || "").match(/^Research angle \\d+:\\s*(.*?)\\s+Lesson:/i);
+        const match = String(row.question || "").match(/^Research angle [0-9]+: (.+?) Lesson:/i);
         return match ? normalize(match[1]) : "";
       })
       .filter(Boolean);
@@ -3088,7 +3088,11 @@ async function handleResearchUrl(db, url) {
 }
 
 async function findExistingResearchSource(db, sourceUrl, doi = "") {
-  const normalizedDoi = String(doi || "").toLowerCase().replace(/^https?:\\/\\/(dx\\.)?doi\\.org\\//, "").trim();
+  const normalizedDoi = String(doi || "").toLowerCase()
+    .replace("https://doi.org/", "")
+    .replace("http://doi.org/", "")
+    .replace("https://dx.doi.org/", "")
+    .trim();
   const doiPattern = normalizedDoi ? `%DOI: %${normalizedDoi}%` : null;
   return db.prepare(`
     SELECT id, research_id, source_url
