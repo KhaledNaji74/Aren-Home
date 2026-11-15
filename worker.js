@@ -2140,20 +2140,20 @@ async function handleSelfDirectedResearch(db) {
 
     const angles = evidenceCount > 0 && challengedCount > 0
       ? [
-          "Find documented counterexamples and conditions where the lesson fails.",
-          "Compare the lesson across different contexts and decision types.",
-          "Test plausible causal mechanisms rather than mere correlation.",
-          "Compare competing explanations for the same outcomes.",
-          "Find independent replications and systematic reviews with conflicting results.",
-          "Identify boundary conditions and measurement limitations behind mixed findings."
+          "Find well-documented counterexamples and identify the conditions under which the lesson fails.",
+          "Compare how the lesson performs across materially different contexts, settings, and decision types.",
+          "Examine plausible causal mechanisms and whether evidence supports those mechanisms rather than mere correlation.",
+          "Compare competing explanations and frameworks that could account for the same outcomes.",
+          "Find independent replication, systematic reviews, and high-quality studies that disagree with one another.",
+          "Identify boundary conditions, measurement problems, and limitations that could explain the mixed findings."
         ]
       : [
-          "Find direct empirical studies that test the lesson and measure its outcomes.",
-          "Find credible counterexamples that could falsify the lesson.",
-          "Compare the lesson across different contexts and situations.",
-          "Test the causal mechanisms that could make the lesson true or false.",
-          "Compare competing explanations and evidence that distinguishes them.",
-          "Find independent replications and high-quality systematic reviews."
+          "Identify direct empirical studies that test the lesson and define the outcomes they measured.",
+          "Find credible counterexamples and evidence that could falsify the lesson.",
+          "Compare the lesson across different contexts and identify where it does or does not apply.",
+          "Examine the mechanisms and causal pathways that would make the lesson true or false.",
+          "Compare competing explanations and identify what evidence distinguishes them.",
+          "Find independent replication and high-quality reviews, noting gaps and limitations."
         ];
 
     // Pick the first genuinely unused method. When all six are exhausted,
@@ -3355,10 +3355,21 @@ async function handleResearchDiscover(db, url) {
       candidates_found: 0,
       sources_saved: 0
     };
-    if (saved.length < 3) {
+    const recentOpenAlexRateLimit = await db.prepare(`
+      SELECT id, created
+      FROM research_discovery_runs
+      WHERE created >= datetime('now', '-24 hours')
+        AND details LIKE '%"name":"OpenAlex"%'
+        AND details LIKE '%"http_status":429%'
+      ORDER BY id DESC
+      LIMIT 1
+    `).first();
+    alternativeProvider.cooldown_active = Boolean(recentOpenAlexRateLimit);
+    if (saved.length < 3 && !recentOpenAlexRateLimit) {
       alternativeProvider.attempted = true;
       const openAlexWorks = new Map();
-      for (const openAlexSearchTerm of uniqueSearchTerms.slice(0, 6)) {
+      // Keep provider load modest; six repeated queries were receiving 429s.
+      for (const openAlexSearchTerm of uniqueSearchTerms.slice(0, 2)) {
         const queryResult = { search_term: openAlexSearchTerm, http_status: null, candidates_found: 0 };
         alternativeProvider.queries_attempted.push(queryResult);
         try {
