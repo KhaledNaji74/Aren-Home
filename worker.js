@@ -2128,35 +2128,45 @@ async function handleSelfDirectedResearch(db) {
     const evidenceCount = Number(lesson.evidence_count || 0);
     const challengedCount = Number(lesson.challenged_count || 0);
     const sequence = priorQuestions.length + 1;
+    // Store only the actual angle label from old questions. Never copy entire
+    // previous prompts into a new prompt: that caused recursive prompt bloat.
     const previousAngles = priorQuestions
       .slice(-6)
-      .map(row => cleanText(row.question).slice(0, 260))
+      .map(row => {
+        const match = String(row.question || "").match(/^Research angle \\d+:\\s*(.*?)\\s+Lesson:/i);
+        return match ? normalize(match[1]) : "";
+      })
       .filter(Boolean);
 
-    // Rotate across materially different research methods. There is no
-    // lifetime question ceiling: each next angle waits for the prior question
-    // to finish discovery and screening, then explicitly excludes prior angles.
     const angles = evidenceCount > 0 && challengedCount > 0
       ? [
-          "Find well-documented counterexamples and identify the conditions under which the lesson fails.",
-          "Compare how the lesson performs across materially different contexts, settings, and decision types.",
-          "Examine plausible causal mechanisms and whether evidence supports those mechanisms rather than mere correlation.",
-          "Compare competing explanations and frameworks that could account for the same outcomes.",
-          "Find independent replication, systematic reviews, and high-quality studies that disagree with one another.",
-          "Identify boundary conditions, measurement problems, and limitations that could explain the mixed findings."
+          "Find documented counterexamples and conditions where the lesson fails.",
+          "Compare the lesson across different contexts and decision types.",
+          "Test plausible causal mechanisms rather than mere correlation.",
+          "Compare competing explanations for the same outcomes.",
+          "Find independent replications and systematic reviews with conflicting results.",
+          "Identify boundary conditions and measurement limitations behind mixed findings."
         ]
       : [
-          "Identify direct empirical studies that test the lesson and define the outcomes they measured.",
-          "Find credible counterexamples and evidence that could falsify the lesson.",
-          "Compare the lesson across different contexts and identify where it does or does not apply.",
-          "Examine the mechanisms and causal pathways that would make the lesson true or false.",
-          "Compare competing explanations and identify what evidence distinguishes them.",
-          "Find independent replication and high-quality reviews, noting gaps and limitations."
+          "Find direct empirical studies that test the lesson and measure its outcomes.",
+          "Find credible counterexamples that could falsify the lesson.",
+          "Compare the lesson across different contexts and situations.",
+          "Test the causal mechanisms that could make the lesson true or false.",
+          "Compare competing explanations and evidence that distinguishes them.",
+          "Find independent replications and high-quality systematic reviews."
         ];
-    const angle = angles[(sequence - 1) % angles.length];
-    const historyConstraint = previousAngles.length
-      ? ` Do not repeat or repackage these earlier research angles: ${previousAngles.join(" | ")}. Choose a genuinely different question, context, method, or test.`
-      : "";
+
+    // Pick the first genuinely unused method. When all six are exhausted,
+    // stop instead of endlessly creating cosmetically different questions.
+    const angle = angles.find(candidate => !previousAngles.includes(normalize(candidate)));
+    if (!angle) {
+      skipped.push({
+        lesson_id: lesson.id,
+        research_id: existing?.id || null,
+        reason: "All available research methods have been used; waiting for new reviewed experience or a genuinely new research direction."
+      });
+      continue;
+    }
 
     let focus;
     if (evidenceCount > 0 && challengedCount > 0) {
@@ -2167,10 +2177,10 @@ async function handleSelfDirectedResearch(db) {
       focus = "The lesson is untested by reviewed experience. Seek direct evidence rather than adjacent background material.";
     }
 
-    const question = `Research angle ${sequence}: ${angle} Lesson: "${lesson.text}". ${focus} Distinguish direct evidence from background context, report source limitations, and do not treat discovery or topic relevance as verification.${historyConstraint}`;
+    const question = `Research angle ${sequence}: ${angle} Lesson: "${lesson.text}". ${focus} Prefer direct empirical evidence. State limitations clearly. Discovery and topic relevance are not verification.`;
 
     const duplicate = priorQuestions.some(row =>
-      normalize(row.question) === normalize(question)
+      normalize(row.question).includes(normalize(angle))
     );
     if (duplicate) {
       skipped.push({
@@ -3077,6 +3087,19 @@ async function handleResearchUrl(db, url) {
   }
 }
 
+async function findExistingResearchSource(db, sourceUrl, doi = "") {
+  const normalizedDoi = String(doi || "").toLowerCase().replace(/^https?:\\/\\/(dx\\.)?doi\\.org\\//, "").trim();
+  const doiPattern = normalizedDoi ? `%DOI: %${normalizedDoi}%` : null;
+  return db.prepare(`
+    SELECT id, research_id, source_url
+    FROM research_sources
+    WHERE source_url = ?
+       OR (? IS NOT NULL AND LOWER(content) LIKE ?)
+    ORDER BY id ASC
+    LIMIT 1
+  `).bind(sourceUrl, normalizedDoi || null, doiPattern).first();
+}
+
 async function handleResearchDiscover(db, url) {
   const researchId = Number(url.searchParams.get("research_id") || 0);
   if (!Number.isSafeInteger(researchId) || researchId < 1) {
@@ -3407,11 +3430,15 @@ async function handleResearchDiscover(db, url) {
 
         const sourceUrl = String(work.id || "").trim();
         if (!/^https:\/\/openalex\.org\/W\d+$/i.test(sourceUrl)) continue;
-        const existing = await db.prepare(
-          "SELECT id FROM research_sources WHERE research_id = ? AND source_url = ? LIMIT 1"
-        ).bind(researchId, sourceUrl).first();
+        const existing = await findExistingResearchSource(db, sourceUrl, work.doi || "");
         if (existing) {
-          skipped.push({ title, provider: "OpenAlex", reason: "Already attached to this research question." });
+          skipped.push({
+            title,
+            provider: "OpenAlex",
+            reason: "Duplicate source already exists in Aren's research library; it was not saved again.",
+            existing_source_id: existing.id,
+            existing_research_id: existing.research_id
+          });
           continue;
         }
 
@@ -3565,11 +3592,15 @@ async function handleResearchDiscover(db, url) {
               ? "https://europepmc.org/article/MED/" + encodeURIComponent(pmid)
               : "";
           if (!sourceUrl) continue;
-          const existing = await db.prepare(
-            "SELECT id FROM research_sources WHERE research_id = ? AND source_url = ? LIMIT 1"
-          ).bind(researchId, sourceUrl).first();
+          const existing = await findExistingResearchSource(db, sourceUrl, work.doi || "");
           if (existing) {
-            skipped.push({ title, provider: "Europe PMC", reason: "Already attached to this research question." });
+            skipped.push({
+              title,
+              provider: "Europe PMC",
+              reason: "Duplicate source already exists in Aren's research library; it was not saved again.",
+              existing_source_id: existing.id,
+              existing_research_id: existing.research_id
+            });
             continue;
           }
 
