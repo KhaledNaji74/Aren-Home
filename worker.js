@@ -4950,9 +4950,15 @@ async function handleTalk(request, env, db) {
     const ip = request.headers.get("CF-Connecting-IP") || "unknown";
     const rateKey = "aren_talk_rate:" + ip;
     if (env.KV) {
+      const now = Date.now();
       const recent = await env.KV.get(rateKey);
-      if (recent) return json({ error: "Please wait a few seconds before sending another message." }, 429);
-      await env.KV.put(rateKey, "1", { expirationTtl: 8 });
+      const lastRequestAt = Number(recent);
+      if (Number.isFinite(lastRequestAt) && now - lastRequestAt < 8000) {
+        return json({ error: "Please wait a few seconds before sending another message." }, 429);
+      }
+      // KV requires expirationTtl >= 60 seconds. The stored timestamp
+      // preserves the intended 8-second cooldown independently of TTL.
+      await env.KV.put(rateKey, String(now), { expirationTtl: 60 });
     }
 
     let body;
