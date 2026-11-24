@@ -4845,6 +4845,7 @@ async function handleAutonomousStatus(db) {
       d.sources_before,
       d.sources_after,
       d.status,
+      d.details,
       d.created
     FROM research_discovery_runs d
     LEFT JOIN research r ON r.id = d.research_id
@@ -4875,6 +4876,51 @@ async function handleAutonomousStatus(db) {
     }
   }
 
+  const summarizeDiscoveryDetails = raw => {
+    let detail = {};
+    try { detail = JSON.parse(raw || "{}"); } catch (_) {
+      return { parse_status: "invalid_json" };
+    }
+    const providers = [
+      detail.alternative_provider,
+      detail.tertiary_provider
+    ].filter(Boolean).map(provider => ({
+      name: provider.name || null,
+      attempted: Boolean(provider.attempted),
+      cooldown_active: Boolean(provider.cooldown_active),
+      http_statuses: [...new Set([
+        provider.http_status,
+        ...(provider.queries_attempted || []).map(query => query.http_status)
+      ].filter(value => value !== null && value !== undefined))],
+      queries_attempted: (provider.queries_attempted || []).length,
+      candidates_found: Number(provider.candidates_found || 0),
+      sources_saved: Number(provider.sources_saved || 0),
+      error: provider.error || null
+    }));
+    const skipped = Array.isArray(detail.skipped) ? detail.skipped : [];
+    const rejectionReasons = {};
+    for (const item of skipped) {
+      const reason = String(item.reason || "Unspecified").slice(0, 180);
+      rejectionReasons[reason] = (rejectionReasons[reason] || 0) + 1;
+    }
+    return {
+      search_topic: detail.search_topic || null,
+      search_variants_count: Array.isArray(detail.search_variants) ? detail.search_variants.length : 0,
+      wikipedia_leads: Number(detail.wikipedia_leads_only || 0),
+      providers,
+      skipped_candidates: skipped.length,
+      rejection_reasons: Object.entries(rejectionReasons)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 5)
+        .map(([reason, count]) => ({ reason, count })),
+      saved_titles: (Array.isArray(detail.saved) ? detail.saved : [])
+        .map(item => item.title).filter(Boolean).slice(0, 5)
+    };
+  };
+  const recentDiscoveryRuns = (discoveryRuns.results || []).map(({ details, ...run }) => ({
+    ...run,
+    diagnostics: summarizeDiscoveryDetails(details)
+  }));
   const recentRuns = (runs.results || []).map(({ result, ...run }) => run);
   return json({
     status: latest?.status === "failed" ? "attention_required" : "available",
@@ -4887,7 +4933,7 @@ async function handleAutonomousStatus(db) {
       error: latest.error
     } : null,
     latest_cycle_research_discovery: latestCycleDiscovery,
-    recent_research_discovery_runs: discoveryRuns.results || [],
+    recent_research_discovery_runs: recentDiscoveryRuns,
     recent_runs: recentRuns,
     latest_task_status_counts: taskSummary.results || [],
     note: "Execution health and research discovery are reported separately. Collected sources remain unverified; discovery does not prove a lesson or create accepted facts."
