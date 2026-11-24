@@ -4843,6 +4843,149 @@ async function handleAutonomousStatus(db) {
   });
 }
 
+async function handleSelfInspection(db, env) {
+  const tableNames = [
+    "memories",
+    "talk_sessions",
+    "talk_messages",
+    "judgments",
+    "memory_history",
+    "development_cycles",
+    "development_tasks",
+    "autonomous_cycle_runs",
+    "ai_development_reviews",
+    "ai_development_review_questions",
+    "development_test_links",
+    "principle_candidates",
+    "research",
+    "research_claims",
+    "research_conclusions",
+    "research_evidence",
+    "research_sources",
+    "research_discovery_runs",
+    "research_source_reviews",
+    "research_source_assessments",
+    "lesson_challenges",
+    "lesson_evaluations",
+    "schema_migrations"
+  ];
+
+  const tables = [];
+  for (const table of tableNames) {
+    try {
+      const row = await db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).first();
+      tables.push({ table, available: true, records: Number(row?.count || 0) });
+    } catch (error) {
+      tables.push({
+        table,
+        available: false,
+        error: String(error?.message || error).slice(0, 180)
+      });
+    }
+  }
+
+  const tableMap = Object.fromEntries(tables.map(item => [item.table, item]));
+  const memoryTypes = await db.prepare(`
+    SELECT type, status, COUNT(*) AS count
+    FROM memories
+    GROUP BY type, status
+    ORDER BY type, status
+  `).all();
+
+  const taskStatuses = await db.prepare(`
+    SELECT status, COUNT(*) AS count
+    FROM development_tasks
+    GROUP BY status
+    ORDER BY status
+  `).all();
+
+  const researchStatuses = await db.prepare(`
+    SELECT status, COUNT(*) AS count
+    FROM research
+    GROUP BY status
+    ORDER BY status
+  `).all();
+
+  const latestRun = await db.prepare(`
+    SELECT id, trigger, status, started_at, completed_at
+    FROM autonomous_cycle_runs
+    ORDER BY id DESC
+    LIMIT 1
+  `).first();
+
+  const latestReview = await db.prepare(`
+    SELECT id, status, model, summary, created_at
+    FROM ai_development_reviews
+    ORDER BY id DESC
+    LIMIT 1
+  `).first();
+
+  const failedTables = tables.filter(item => !item.available).map(item => item.table);
+  const conversationTablesAvailable =
+    tableMap.talk_sessions?.available === true &&
+    tableMap.talk_messages?.available === true;
+
+  return json({
+    inspection_version: 1,
+    checked_at: new Date().toISOString(),
+    status: failedTables.length ? "attention_required" : "available",
+    evidence_scope: "Read-only inspection of database tables, record counts, latest execution records, and runtime bindings. Counts prove database accessibility, not end-to-end behavior.",
+    runtime: {
+      worker: "Aren Home",
+      database_binding: "AREN_DB",
+      database_available: true,
+      kv_binding_available: Boolean(env?.KV),
+      workers_ai_binding_available: Boolean(env?.AI && typeof env.AI.run === "function"),
+      configured_chat_model: "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
+    },
+    capabilities: {
+      structured_memory: {
+        available: tableMap.memories?.available === true,
+        evidence: "D1 memories table is queryable; records are grouped by type and status below."
+      },
+      conversation_storage: {
+        available: conversationTablesAvailable,
+        evidence: "D1 talk_sessions and talk_messages tables are queryable. This endpoint does not perform a browser restoration test."
+      },
+      judgments: {
+        available: tableMap.judgments?.available === true,
+        evidence: "D1 judgments table is queryable."
+      },
+      development_tracking: {
+        available: tableMap.development_cycles?.available === true &&
+          tableMap.development_tasks?.available === true,
+        evidence: "Development cycle and task tables are queryable."
+      },
+      autonomous_execution_records: {
+        available: tableMap.autonomous_cycle_runs?.available === true,
+        evidence: "Latest recorded run is reported below; a record does not prove future execution."
+      },
+      ai_development_reviews: {
+        available: tableMap.ai_development_reviews?.available === true,
+        evidence: "Latest stored AI development review is reported below; its presence does not mean a review is currently running."
+      }
+    },
+    record_summaries: {
+      memories_by_type_and_status: memoryTypes.results || [],
+      development_tasks_by_status: taskStatuses.results || [],
+      research_by_status: researchStatuses.results || [],
+      conversation_sessions: tableMap.talk_sessions?.records ?? null,
+      conversation_messages: tableMap.talk_messages?.records ?? null,
+      judgments: tableMap.judgments?.records ?? null
+    },
+    latest_autonomous_run: latestRun || null,
+    latest_ai_development_review: latestReview || null,
+    tables,
+    failed_tables: failedTables,
+    limitations: [
+      "This endpoint is read-only and does not change memories, lessons, principles, judgments, or development tasks.",
+      "It verifies database accessibility and record counts, not the correctness or quality of stored content.",
+      "It does not independently test browser session restoration or whether the AI uses every relevant record correctly.",
+      "The model cannot directly inspect arbitrary Worker internals; this endpoint exposes only the explicit inspection report."
+    ]
+  }, failedTables.length ? 503 : 200);
+}
+
 async function handleHealth(db) {
   const requiredTables = [
     "memories",
@@ -5313,6 +5456,7 @@ function homepage() {
   <a href="/principles">Principles</a>
   <a href="/lessons">Lessons</a>
   <a href="/development">Development</a>
+  <a href="/self-inspection">Self Inspection</a>
   <a href="/self-evaluate">Self Evaluation</a>
   <a href="/principle-candidates">Principle Candidates</a>
   <a href="/judgments">Judgments</a>
@@ -5346,6 +5490,10 @@ export default {
 
       if (path === "/ai-development") {
         return await handleAIDevelopmentReviews(db);
+      }
+
+      if (path === "/self-inspection" && request.method === "GET") {
+        return await handleSelfInspection(db, env);
       }
 
       if (path === "/health") {
