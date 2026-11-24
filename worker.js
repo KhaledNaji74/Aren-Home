@@ -3205,7 +3205,10 @@ async function handleResearchDiscover(db, url) {
       { name: "preservation-and-retention", patterns: [/\bknowledge retention\b/, /\bmemory retention\b/, /\bmemory consolidation\b/, /\blong-term memory\b/, /\borganizational memory\b/, /\binstitutional memory\b/, /\bknowledge management\b/, /\bknowledge preservation\b/, /\bpreserving knowledge\b/, /\bretention of knowledge\b/] },
       { name: "review-and-improvement", patterns: [/\bafter action review\b/, /\bpostmortem analysis\b/, /\bcontinuous improvement\b/, /\breflective learning\b/, /\bexperience review\b/, /\blessons learned process\b/] },
       { name: "memory-and-retrieval", patterns: [/\bepisodic memory\b/, /\bautobiographical memory\b/, /\bmemory retrieval\b/, /\bretrieval practice\b/, /\bmemory recall\b/, /\brecall of past experience\b/] },
-      { name: "knowledge-capture-and-transfer", patterns: [/\bknowledge capture\b/, /\bknowledge transfer\b/, /\bknowledge sharing\b/, /\borganizational learning\b/, /\bexperience sharing\b/] }
+      { name: "knowledge-capture-and-transfer", patterns: [/\bknowledge capture\b/, /\bknowledge transfer\b/, /\bknowledge sharing\b/, /\borganizational learning\b/, /\bexperience sharing\b/] },
+      { name: "continual-ai-learning", patterns: [/\bcontinual learning\b/, /\bcontinuous learning\b/, /\blifelong learning\b/, /\bcontinual adaptation\b/, /\bincremental learning\b/] },
+      { name: "agent-memory-and-experience", patterns: [/\bagent memory\b/, /\bmemory for (?:autonomous )?agents\b/, /\bmemory-augmented agents\b/, /\bautonomous agents?\b/, /\bexperience replay\b/, /\breplay buffer\b/, /\bepisodic control\b/] },
+      { name: "ai-learning-systems", patterns: [/\bartificial intelligence\b/, /\bmachine learning\b/, /\bdeep reinforcement learning\b/, /\breinforcement learning\b/, /\blanguage models?\b/, /\bllm agents?\b/] }
     ]
   };
   const profiles = profilesByTopic[researchTopic];
@@ -3254,8 +3257,8 @@ async function handleResearchDiscover(db, url) {
         body: ["decision-making", "outcomes-and-consequences", "learning-and-review"]
       },
       "learning-from-experience": {
-        title: ["learning-from-experience", "preservation-and-retention", "memory-and-retrieval", "review-and-improvement"],
-        body: ["learning-from-experience", "memory-and-retrieval", "review-and-improvement", "preservation-and-retention", "knowledge-capture-and-transfer"]
+        title: ["learning-from-experience", "continual-ai-learning", "agent-memory-and-experience"],
+        body: ["learning-from-experience", "preservation-and-retention", "review-and-improvement", "memory-and-retrieval", "knowledge-capture-and-transfer", "continual-ai-learning", "agent-memory-and-experience", "ai-learning-systems"]
       }
     };
     const rule = requirements[researchTopic];
@@ -3305,12 +3308,12 @@ async function handleResearchDiscover(db, url) {
       "decision analysis outcome evaluation"
     ],
     "learning-from-experience": [
-      "experiential learning knowledge retention",
-      "lessons learned organizational learning",
-      "after action review lessons learned",
-      "reflective practice experience retention",
-      "debriefing knowledge capture",
-      "experience based learning knowledge transfer"
+      "continual learning in artificial intelligence systems",
+      "lifelong learning autonomous agents persistent memory",
+      "experience replay reinforcement learning agents",
+      "memory augmented language model agents long term memory",
+      "learning from interaction feedback autonomous agents",
+      "knowledge retention continual machine learning"
     ]
   };
   const searchTerms = [...topicSearchTerms[researchTopic], searchTerm];
@@ -3395,8 +3398,8 @@ async function handleResearchDiscover(db, url) {
     if (saved.length < 3 && !recentOpenAlexRateLimit) {
       alternativeProvider.attempted = true;
       const openAlexWorks = new Map();
-      // Keep provider load modest; six repeated queries were receiving 429s.
-      for (const openAlexSearchTerm of uniqueSearchTerms.slice(0, 2)) {
+      // Three targeted queries balance broader AI coverage against provider rate limits.
+      for (const openAlexSearchTerm of uniqueSearchTerms.slice(0, 3)) {
         const queryResult = { search_term: openAlexSearchTerm, http_status: null, candidates_found: 0 };
         alternativeProvider.queries_attempted.push(queryResult);
         try {
