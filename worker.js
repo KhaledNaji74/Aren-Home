@@ -4819,7 +4819,7 @@ async function handleAIDevelopmentReviews(db) {
 
 async function handleAutonomousStatus(db) {
   const runs = await db.prepare(`
-    SELECT id, trigger, status, started_at, completed_at, error
+    SELECT id, trigger, status, started_at, completed_at, error, result
     FROM autonomous_cycle_runs
     ORDER BY id DESC
     LIMIT 10
@@ -4836,13 +4836,61 @@ async function handleAutonomousStatus(db) {
     GROUP BY status
   `).all();
 
+  const discoveryRuns = await db.prepare(`
+    SELECT
+      d.id,
+      d.research_id,
+      r.question,
+      d.attempt_number,
+      d.sources_before,
+      d.sources_after,
+      d.status,
+      d.created
+    FROM research_discovery_runs d
+    LEFT JOIN research r ON r.id = d.research_id
+    ORDER BY d.id DESC
+    LIMIT 10
+  `).all();
+
   const latest = runs.results?.[0] || null;
+  let latestCycleDiscovery = null;
+  if (latest?.result) {
+    try {
+      const storedResult = JSON.parse(latest.result);
+      const discovery = storedResult?.cycle?.research_discovery || null;
+      if (discovery) {
+        latestCycleDiscovery = {
+          status: discovery.status || null,
+          research_id: discovery.research_id ?? null,
+          attempt_number: discovery.attempt_number ?? null,
+          sources_before: discovery.sources_before ?? null,
+          sources_after: discovery.sources_after ?? null,
+          sources_saved: discovery.sources_saved ?? discovery.sources_added ?? null,
+          triggered_by: discovery.triggered_by || null,
+          reason: discovery.reason || null
+        };
+      }
+    } catch (_) {
+      latestCycleDiscovery = { status: "unavailable", reason: "The latest run result could not be parsed." };
+    }
+  }
+
+  const recentRuns = (runs.results || []).map(({ result, ...run }) => run);
   return json({
     status: latest?.status === "failed" ? "attention_required" : "available",
-    latest_run: latest,
-    recent_runs: runs.results || [],
+    latest_run: latest ? {
+      id: latest.id,
+      trigger: latest.trigger,
+      status: latest.status,
+      started_at: latest.started_at,
+      completed_at: latest.completed_at,
+      error: latest.error
+    } : null,
+    latest_cycle_research_discovery: latestCycleDiscovery,
+    recent_research_discovery_runs: discoveryRuns.results || [],
+    recent_runs: recentRuns,
     latest_task_status_counts: taskSummary.results || [],
-    note: "This endpoint reports execution health. A completed cycle does not mean every research source is verified or every lesson is proven."
+    note: "Execution health and research discovery are reported separately. Collected sources remain unverified; discovery does not prove a lesson or create accepted facts."
   });
 }
 
