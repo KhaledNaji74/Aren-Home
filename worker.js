@@ -3436,18 +3436,18 @@ async function handleResearchDiscover(db, url) {
           generalWebProvider.error = "General web search provider returned HTTP " + webSearchResponse.status;
         } else {
           const rss = (await webSearchResponse.text()).slice(0, 120000);
-          const items = [...rss.matchAll(/<item\\b[^>]*>([\\s\\S]*?)<\\/item>/gi)].slice(0, 8);
+          const items = [...rss.matchAll(/<item\b[^>]*>([\s\S]*?)<\/item>/gi)].slice(0, 8);
           const decodeXml = value => String(value || "")
-            .replace(/<!\\[CDATA\\[([\\s\\S]*?)\\]\\]>/g, "$1")
+            .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, "$1")
             .replace(/&amp;/gi, "&").replace(/&quot;/gi, '"')
             .replace(/&#39;|&apos;/gi, "'").replace(/&lt;/gi, "<")
             .replace(/&gt;/gi, ">").trim();
           const webCandidates = [];
           for (const match of items) {
             const block = match[1];
-            const title = decodeXml((block.match(/<title>([\\s\\S]*?)<\\/title>/i) || [])[1]);
-            const link = decodeXml((block.match(/<link>([\\s\\S]*?)<\\/link>/i) || [])[1]);
-            const description = decodeXml((block.match(/<description>([\\s\\S]*?)<\\/description>/i) || [])[1]);
+            const title = decodeXml((block.match(/<title>([\s\S]*?)<\/title>/i) || [])[1]);
+            const link = decodeXml((block.match(/<link>([\s\S]*?)<\/link>/i) || [])[1]);
+            const description = decodeXml((block.match(/<description>([\s\S]*?)<\/description>/i) || [])[1]);
             if (!title || !link) continue;
             let candidateUrl;
             try { candidateUrl = new URL(link); } catch (_) { continue; }
@@ -3828,6 +3828,7 @@ async function handleResearchDiscover(db, url) {
       provider: "OpenAlex and Europe PMC academic indexes; Wikipedia search used only for discovery leads",
       candidates_found: candidates.length,
       wikipedia_leads_only: candidates.length,
+      general_web_provider: generalWebProvider,
       alternative_provider: alternativeProvider,
       tertiary_provider: europePmcProvider,
       sources_saved: saved.length,
