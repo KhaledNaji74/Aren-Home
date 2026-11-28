@@ -352,8 +352,24 @@ async function ensureTables(db) {
       claim TEXT NOT NULL,
       evidence TEXT,
       confidence INTEGER DEFAULT 1,
+      source_assessment_id INTEGER,
+      status TEXT NOT NULL DEFAULT 'pending_verification',
       created DATETIME DEFAULT CURRENT_TIMESTAMP
     )
+  `).run();
+
+  const claimColumnsResult = await db.prepare("PRAGMA table_info(research_claims)").all();
+  const claimColumns = new Set((claimColumnsResult.results || []).map(column => column.name));
+  if (!claimColumns.has("source_assessment_id")) {
+    await db.prepare("ALTER TABLE research_claims ADD COLUMN source_assessment_id INTEGER").run();
+  }
+  if (!claimColumns.has("status")) {
+    await db.prepare("ALTER TABLE research_claims ADD COLUMN status TEXT NOT NULL DEFAULT 'pending_verification'").run();
+  }
+  await db.prepare(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_research_claims_source_assessment
+    ON research_claims(source_assessment_id)
+    WHERE source_assessment_id IS NOT NULL
   `).run();
 
   await db.prepare(`
@@ -2270,6 +2286,7 @@ async function handleAutonomousCycle(db, env) {
   const researchDiscovery = await handleAutonomousResearchDiscovery(db);
   const researchReview = await handleAutonomousResearchReview(db);
   const researchEvidenceAssessment = await handleAutonomousEvidenceAssessment(db, env);
+  const researchAssessmentClaimQueue = await handleQueueResearchAssessmentClaims(db);
 
   const developmentResponse = await handleExecuteDevelopment(db);
   const development = await developmentResponse.json();
@@ -2282,6 +2299,7 @@ async function handleAutonomousCycle(db, env) {
     research_discovery: researchDiscovery,
     research_review: researchReview,
     research_evidence_assessment: researchEvidenceAssessment,
+    research_assessment_claim_queue: researchAssessmentClaimQueue,
     development
   };
 
@@ -2754,6 +2772,17 @@ async function handleResearchEvidence(db, url) {
 
   if (!claim || Number(claim.research_id) !== researchId) {
     return textResponse("Research claim not found for this research", 404);
+  }
+
+  if (claim.source_assessment_id && claim.status !== "verified") {
+    return json({
+      status: "Research evidence held for verification.",
+      reason: "AI-generated preliminary claims cannot be used as accepted lesson evidence until independently verified.",
+      claim_id: claimId,
+      verification_status: claim.status || "pending_verification",
+      lesson_changed: false,
+      principle_changed: false
+    }, 409);
   }
 
   const lesson = await getMemoryById(db, lessonId);
@@ -4090,6 +4119,83 @@ async function handleAutonomousEvidenceAssessment(db, env) {
   }
 }
 
+async function handleQueueResearchAssessmentClaims(db) {
+  // Bridge preliminary source assessments into the claim ledger without
+  // treating them as verified facts or accepted lesson evidence.
+  const candidate = await db.prepare(`
+    SELECT a.id AS assessment_id, a.research_id, a.lesson_id,
+           a.assessment, a.evidence_excerpt, a.confidence,
+           a.reasoning, a.limitation, a.source_locator
+    FROM research_source_assessments a
+    LEFT JOIN research_claims c
+      ON c.source_assessment_id = a.id
+    WHERE a.assessment IN ('supports', 'challenges')
+      AND a.evidence_excerpt IS NOT NULL
+      AND length(trim(a.evidence_excerpt)) >= 20
+      AND c.id IS NULL
+    ORDER BY a.id ASC
+    LIMIT 1
+  `).first();
+
+  if (!candidate) {
+    return {
+      status: "waiting",
+      reason: "No unqueued supporting or challenging assessment with an exact excerpt is available.",
+      claims_queued: 0
+    };
+  }
+
+  const inserted = await db.prepare(`
+    INSERT OR IGNORE INTO research_claims
+      (research_id, claim, evidence, confidence, source_assessment_id, status)
+    VALUES (?, ?, ?, 1, ?, 'pending_verification')
+  `).bind(
+    candidate.research_id,
+    candidate.evidence_excerpt,
+    candidate.evidence_excerpt,
+    candidate.assessment_id
+  ).run();
+
+  return {
+    status: inserted.meta?.changes ? "pending_claim_created" : "already_queued",
+    assessment_id: candidate.assessment_id,
+    research_id: candidate.research_id,
+    lesson_id: candidate.lesson_id,
+    claim_id: inserted.meta?.last_row_id || null,
+    preliminary_assessment: candidate.assessment,
+    verification_status: "pending_verification",
+    source_locator: candidate.source_locator,
+    claims_queued: Number(inserted.meta?.changes || 0),
+    lesson_changed: false,
+    principle_changed: false
+  };
+}
+
+async function handleResearchAssessmentQueue(db) {
+  const result = await db.prepare(`
+    SELECT c.id AS claim_id, c.research_id, c.claim, c.evidence,
+           c.status, c.confidence, c.created,
+           a.id AS assessment_id, a.lesson_id, a.assessment,
+           a.reasoning, a.limitation, a.source_locator,
+           s.source_url, s.source_host, r.question
+    FROM research_claims c
+    INNER JOIN research_source_assessments a
+      ON a.id = c.source_assessment_id
+    LEFT JOIN research_sources s ON s.id = a.source_id
+    LEFT JOIN research r ON r.id = c.research_id
+    WHERE c.status = 'pending_verification'
+    ORDER BY c.id ASC
+    LIMIT 50
+  `).all();
+
+  return json({
+    status: "Pending research claims retrieved.",
+    count: result.results?.length || 0,
+    note: "These are AI-generated preliminary claims. They are not verified sources or accepted lesson evidence.",
+    claims: result.results || []
+  });
+}
+
 async function handleAutonomousResearchReview(db, researchId = 0, forceRescreen = false) {
   const pending = await db.prepare(`
     SELECT s.id AS source_id, s.research_id, s.source_url, s.source_host,
@@ -4825,6 +4931,34 @@ async function handleAutonomousStatus(db) {
     LIMIT 10
   `).all();
 
+  const failedTasksResult = await db.prepare(`
+    SELECT id, cycle_id, type, target_memory_id, related_memory_id,
+           task, result, created, completed
+    FROM development_tasks
+    WHERE status = 'failed'
+    ORDER BY id DESC
+    LIMIT 5
+  `).all();
+
+  const failedTasks = (failedTasksResult.results || []).map(task => {
+    let detail = {};
+    try { detail = JSON.parse(task.result || "{}"); } catch (_) {
+      detail = { error: "Stored task result is not valid JSON." };
+    }
+    return {
+      id: task.id,
+      cycle_id: task.cycle_id,
+      type: task.type,
+      target_memory_id: task.target_memory_id,
+      related_memory_id: task.related_memory_id,
+      task: task.task,
+      error: detail.error || null,
+      result: detail,
+      created: task.created,
+      completed: task.completed
+    };
+  });
+
   const taskSummary = await db.prepare(`
     SELECT status, COUNT(*) AS count
     FROM development_tasks
@@ -4936,7 +5070,8 @@ async function handleAutonomousStatus(db) {
     recent_research_discovery_runs: recentDiscoveryRuns,
     recent_runs: recentRuns,
     latest_task_status_counts: taskSummary.results || [],
-    note: "Execution health and research discovery are reported separately. Collected sources remain unverified; discovery does not prove a lesson or create accepted facts."
+    recent_failed_tasks: failedTasks,
+    note: "Execution health and research discovery are reported separately. Collected sources remain unverified; preliminary assessment claims remain pending verification and never change lesson evidence or principles automatically."
   });
 }
 
@@ -5587,6 +5722,10 @@ export default {
 
       if (path === "/ai-development") {
         return await handleAIDevelopmentReviews(db);
+      }
+
+      if (path === "/research-review-queue" && request.method === "GET") {
+        return await handleResearchAssessmentQueue(db);
       }
 
       if (path === "/self-inspection" && request.method === "GET") {
