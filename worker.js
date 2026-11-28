@@ -2767,7 +2767,7 @@ async function handleResearchEvidence(db, url) {
   }
 
   const claim = await db.prepare(
-    "SELECT id, research_id, claim, evidence, confidence FROM research_claims WHERE id = ?"
+    "SELECT id, research_id, claim, evidence, confidence, source_assessment_id, status FROM research_claims WHERE id = ?"
   ).bind(claimId).first();
 
   if (!claim || Number(claim.research_id) !== researchId) {
